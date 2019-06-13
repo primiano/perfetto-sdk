@@ -3489,7 +3489,7 @@ void ThreadTaskRunner::RunTaskThread(
 }  // namespace perfetto
 // gen_amalgamated begin source: src/base/unix_task_runner.cc
 // gen_amalgamated begin header: include/perfetto/ext/base/watchdog.h
-// gen_amalgamated begin header: include/perfetto/ext/base/watchdog_noop.h
+// gen_amalgamated begin header: include/perfetto/ext/base/watchdog_posix.h
 /*
  * Copyright (C) 2018 The Android Open Source Project
  *
@@ -3506,37 +3506,144 @@ void ThreadTaskRunner::RunTaskThread(
  * limitations under the License.
  */
 
-#ifndef INCLUDE_PERFETTO_EXT_BASE_WATCHDOG_NOOP_H_
-#define INCLUDE_PERFETTO_EXT_BASE_WATCHDOG_NOOP_H_
+#ifndef INCLUDE_PERFETTO_EXT_BASE_WATCHDOG_POSIX_H_
+#define INCLUDE_PERFETTO_EXT_BASE_WATCHDOG_POSIX_H_
 
-#include <stdint.h>
+// gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
+
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace perfetto {
 namespace base {
 
+// Ensures that the calling program does not exceed certain hard limits on
+// resource usage e.g. time, memory and CPU. If exceeded, the program is
+// crashed.
 class Watchdog {
  public:
+  // Handle to the timer set to crash the program. If the handle is dropped,
+  // the timer is removed so the program does not crash.
   class Timer {
    public:
-    // Define an empty dtor to avoid "unused variable" errors on the call site.
-    Timer() {}
-    Timer(const Timer&) {}
-    ~Timer() {}
+    ~Timer();
+    Timer(Timer&&) noexcept;
+
+   private:
+    friend class Watchdog;
+
+    explicit Timer(uint32_t ms);
+    Timer(const Timer&) = delete;
+    Timer& operator=(const Timer&) = delete;
+
+    timer_t timerid_ = nullptr;
   };
-  static Watchdog* GetInstance() {
-    static Watchdog* watchdog = new Watchdog();
-    return watchdog;
-  }
-  Timer CreateFatalTimer(uint32_t /*ms*/) { return Timer(); }
-  void Start() {}
-  void SetMemoryLimit(uint32_t /*bytes*/, uint32_t /*window_ms*/) {}
-  void SetCpuLimit(uint32_t /*percentage*/, uint32_t /*window_ms*/) {}
+  virtual ~Watchdog();
+
+  static Watchdog* GetInstance();
+
+  // Sets a timer which will crash the program in |ms| milliseconds if the
+  // returned handle is not destroyed before this point.
+  Timer CreateFatalTimer(uint32_t ms);
+
+  // Starts the watchdog thread which monitors the memory and CPU usage
+  // of the program.
+  void Start();
+
+  // Sets a limit on the memory (defined as the RSS) used by the program
+  // averaged over the last |window_ms| milliseconds. If |kb| is 0, any
+  // existing limit is removed.
+  // Note: |window_ms| has to be a multiple of |polling_interval_ms_|.
+  void SetMemoryLimit(uint64_t bytes, uint32_t window_ms);
+
+  // Sets a limit on the CPU usage used by the program averaged over the last
+  // |window_ms| milliseconds. If |percentage| is 0, any existing limit is
+  // removed.
+  // Note: |window_ms| has to be a multiple of |polling_interval_ms_|.
+  void SetCpuLimit(uint32_t percentage, uint32_t window_ms);
+
+ protected:
+  // Protected for testing.
+  Watchdog(uint32_t polling_interval_ms);
+
+ private:
+  // Represents a ring buffer in which integer values can be stored.
+  class WindowedInterval {
+   public:
+    // Pushes a new value into a ring buffer wrapping if necessary and returns
+    // whether the ring buffer is full.
+    bool Push(uint64_t sample);
+
+    // Returns the mean of the values in the buffer.
+    double Mean() const;
+
+    // Clears the ring buffer while keeping the existing size.
+    void Clear();
+
+    // Resets the size of the buffer as well as clearing it.
+    void Reset(size_t new_size);
+
+    // Gets the oldest value inserted in the buffer. The buffer must be full
+    // (i.e. Push returned true) before this method can be called.
+    uint64_t OldestWhenFull() const {
+      PERFETTO_CHECK(filled_);
+      return buffer_[position_];
+    }
+
+    // Gets the newest value inserted in the buffer. The buffer must be full
+    // (i.e. Push returned true) before this method can be called.
+    uint64_t NewestWhenFull() const {
+      PERFETTO_CHECK(filled_);
+      return buffer_[(position_ + size_ - 1) % size_];
+    }
+
+    // Returns the size of the ring buffer.
+    size_t size() const { return size_; }
+
+   private:
+    bool filled_ = false;
+    size_t position_ = 0;
+    size_t size_ = 0;
+    std::unique_ptr<uint64_t[]> buffer_;
+  };
+
+  explicit Watchdog(const Watchdog&) = delete;
+  Watchdog& operator=(const Watchdog&) = delete;
+
+  // Main method for the watchdog thread.
+  void ThreadMain();
+
+  // Check each type of resource every |polling_interval_ms_| miillis.
+  void CheckMemory(uint64_t rss_bytes);
+  void CheckCpu(uint64_t cpu_time);
+
+  // Computes the time interval spanned by a given ring buffer with respect
+  // to |polling_interval_ms_|.
+  uint32_t WindowTimeForRingBuffer(const WindowedInterval& window);
+
+  const uint32_t polling_interval_ms_;
+  std::atomic<bool> enabled_{false};
+  std::thread thread_;
+  std::condition_variable exit_signal_;
+
+  // --- Begin lock-protected members ---
+
+  std::mutex mutex_;
+
+  uint64_t memory_limit_bytes_ = 0;
+  WindowedInterval memory_window_bytes_;
+
+  uint32_t cpu_limit_percentage_ = 0;
+  WindowedInterval cpu_window_time_ticks_;
+
+  // --- End lock-protected members ---
 };
 
 }  // namespace base
 }  // namespace perfetto
-
-#endif  // INCLUDE_PERFETTO_EXT_BASE_WATCHDOG_NOOP_H_
+#endif  // INCLUDE_PERFETTO_EXT_BASE_WATCHDOG_POSIX_H_
 /*
  * Copyright (C) 2018 The Android Open Source Project
  *
@@ -3816,6 +3923,280 @@ bool UnixTaskRunner::RunsTasksOnCurrentThread() const {
 
 }  // namespace base
 }  // namespace perfetto
+// gen_amalgamated begin source: src/base/watchdog_posix.cc
+/*
+ * Copyright (C) 2018 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// gen_amalgamated expanded: #include "perfetto/base/build_config.h"
+
+// Watchdog is currently not supported on Mac. This ifdef-based exclusion is
+// here only for the Mac build in AOSP. The standalone and chromium builds
+// exclude this file at the GN level. However, propagating the per-os exclusion
+// through our GN -> BP build file translator is not worth the effort for a
+// one-off case.
+#if !PERFETTO_BUILDFLAG(PERFETTO_OS_MACOSX)
+
+// gen_amalgamated expanded: #include "perfetto/ext/base/watchdog_posix.h"
+
+#include <fcntl.h>
+#include <inttypes.h>
+#include <signal.h>
+#include <stdint.h>
+
+#include <fstream>
+#include <thread>
+
+// gen_amalgamated expanded: #include "perfetto/base/build_config.h"
+// gen_amalgamated expanded: #include "perfetto/base/logging.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/scoped_file.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/thread_utils.h"
+
+#if PERFETTO_BUILDFLAG(PERFETTO_EMBEDDER_BUILD)
+#error perfetto::base::Watchdog should not be used in Chromium or embedders
+#endif
+
+namespace perfetto {
+namespace base {
+
+namespace {
+
+constexpr uint32_t kDefaultPollingInterval = 30 * 1000;
+
+bool IsMultipleOf(uint32_t number, uint32_t divisor) {
+  return number >= divisor && number % divisor == 0;
+}
+
+double MeanForArray(const uint64_t array[], size_t size) {
+  uint64_t total = 0;
+  for (size_t i = 0; i < size; i++) {
+    total += array[i];
+  }
+  return total / size;
+}
+
+}  //  namespace
+
+Watchdog::Watchdog(uint32_t polling_interval_ms)
+    : polling_interval_ms_(polling_interval_ms) {}
+
+Watchdog::~Watchdog() {
+  if (!thread_.joinable()) {
+    PERFETTO_DCHECK(!enabled_);
+    return;
+  }
+  PERFETTO_DCHECK(enabled_);
+  enabled_ = false;
+  exit_signal_.notify_one();
+  thread_.join();
+}
+
+Watchdog* Watchdog::GetInstance() {
+  static Watchdog* watchdog = new Watchdog(kDefaultPollingInterval);
+  return watchdog;
+}
+
+Watchdog::Timer Watchdog::CreateFatalTimer(uint32_t ms) {
+  if (!enabled_.load(std::memory_order_relaxed))
+    return Watchdog::Timer(0);
+
+  return Watchdog::Timer(ms);
+}
+
+void Watchdog::Start() {
+  std::lock_guard<std::mutex> guard(mutex_);
+  if (thread_.joinable()) {
+    PERFETTO_DCHECK(enabled_);
+  } else {
+    PERFETTO_DCHECK(!enabled_);
+
+#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) || \
+    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+    // Kick the thread to start running but only on Android or Linux.
+    enabled_ = true;
+    thread_ = std::thread(&Watchdog::ThreadMain, this);
+#endif
+  }
+}
+
+void Watchdog::SetMemoryLimit(uint64_t bytes, uint32_t window_ms) {
+  // Update the fields under the lock.
+  std::lock_guard<std::mutex> guard(mutex_);
+
+  PERFETTO_CHECK(IsMultipleOf(window_ms, polling_interval_ms_) || bytes == 0);
+
+  size_t size = bytes == 0 ? 0 : window_ms / polling_interval_ms_ + 1;
+  memory_window_bytes_.Reset(size);
+  memory_limit_bytes_ = bytes;
+}
+
+void Watchdog::SetCpuLimit(uint32_t percentage, uint32_t window_ms) {
+  std::lock_guard<std::mutex> guard(mutex_);
+
+  PERFETTO_CHECK(percentage <= 100);
+  PERFETTO_CHECK(IsMultipleOf(window_ms, polling_interval_ms_) ||
+                 percentage == 0);
+
+  size_t size = percentage == 0 ? 0 : window_ms / polling_interval_ms_ + 1;
+  cpu_window_time_ticks_.Reset(size);
+  cpu_limit_percentage_ = percentage;
+}
+
+void Watchdog::ThreadMain() {
+  base::ScopedFile stat_fd(base::OpenFile("/proc/self/stat", O_RDONLY));
+  if (!stat_fd) {
+    PERFETTO_ELOG("Failed to open stat file to enforce resource limits.");
+    return;
+  }
+
+  std::unique_lock<std::mutex> guard(mutex_);
+  for (;;) {
+    exit_signal_.wait_for(guard,
+                          std::chrono::milliseconds(polling_interval_ms_));
+    if (!enabled_)
+      return;
+
+    lseek(stat_fd.get(), 0, SEEK_SET);
+
+    char c[512];
+    if (read(stat_fd.get(), c, sizeof(c)) < 0) {
+      PERFETTO_ELOG("Failed to read stat file to enforce resource limits.");
+      return;
+    }
+    c[sizeof(c) - 1] = '\0';
+
+    unsigned long int utime = 0l;
+    unsigned long int stime = 0l;
+    long int rss_pages = -1l;
+    PERFETTO_CHECK(
+        sscanf(c,
+               "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu"
+               "%lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+               &utime, &stime, &rss_pages) == 3);
+
+    uint64_t cpu_time = utime + stime;
+    uint64_t rss_bytes = static_cast<uint64_t>(rss_pages) * base::kPageSize;
+
+    CheckMemory(rss_bytes);
+    CheckCpu(cpu_time);
+  }
+}
+
+void Watchdog::CheckMemory(uint64_t rss_bytes) {
+  if (memory_limit_bytes_ == 0)
+    return;
+
+  // Add the current stat value to the ring buffer and check that the mean
+  // remains under our threshold.
+  if (memory_window_bytes_.Push(rss_bytes)) {
+    if (memory_window_bytes_.Mean() > memory_limit_bytes_) {
+      PERFETTO_ELOG(
+          "Memory watchdog trigger. Memory window of %f bytes is above the "
+          "%" PRIu64 " bytes limit.",
+          memory_window_bytes_.Mean(), memory_limit_bytes_);
+      kill(getpid(), SIGABRT);
+    }
+  }
+}
+
+void Watchdog::CheckCpu(uint64_t cpu_time) {
+  if (cpu_limit_percentage_ == 0)
+    return;
+
+  // Add the cpu time to the ring buffer.
+  if (cpu_window_time_ticks_.Push(cpu_time)) {
+    // Compute the percentage over the whole window and check that it remains
+    // under the threshold.
+    uint64_t difference_ticks = cpu_window_time_ticks_.NewestWhenFull() -
+                                cpu_window_time_ticks_.OldestWhenFull();
+    double window_interval_ticks =
+        (static_cast<double>(WindowTimeForRingBuffer(cpu_window_time_ticks_)) /
+         1000.0) *
+        sysconf(_SC_CLK_TCK);
+    double percentage = static_cast<double>(difference_ticks) /
+                        static_cast<double>(window_interval_ticks) * 100;
+    if (percentage > cpu_limit_percentage_) {
+      PERFETTO_ELOG("CPU watchdog trigger. %f%% CPU use is above the %" PRIu32
+                    "%% CPU limit.",
+                    percentage, cpu_limit_percentage_);
+      kill(getpid(), SIGABRT);
+    }
+  }
+}
+
+uint32_t Watchdog::WindowTimeForRingBuffer(const WindowedInterval& window) {
+  return static_cast<uint32_t>(window.size() - 1) * polling_interval_ms_;
+}
+
+bool Watchdog::WindowedInterval::Push(uint64_t sample) {
+  // Add the sample to the current position in the ring buffer.
+  buffer_[position_] = sample;
+
+  // Update the position with next one circularily.
+  position_ = (position_ + 1) % size_;
+
+  // Set the filled flag the first time we wrap.
+  filled_ = filled_ || position_ == 0;
+  return filled_;
+}
+
+double Watchdog::WindowedInterval::Mean() const {
+  return MeanForArray(buffer_.get(), size_);
+}
+
+void Watchdog::WindowedInterval::Clear() {
+  position_ = 0;
+  buffer_.reset(new uint64_t[size_]());
+}
+
+void Watchdog::WindowedInterval::Reset(size_t new_size) {
+  position_ = 0;
+  size_ = new_size;
+  buffer_.reset(new_size == 0 ? nullptr : new uint64_t[new_size]());
+}
+
+Watchdog::Timer::Timer(uint32_t ms) {
+  if (!ms)
+    return;  // No-op timer created when the watchdog is disabled.
+
+  struct sigevent sev = {};
+  sev.sigev_notify = SIGEV_THREAD_ID;
+  sev._sigev_un._tid = base::GetThreadId();
+  sev.sigev_signo = SIGABRT;
+  PERFETTO_CHECK(timer_create(CLOCK_MONOTONIC, &sev, &timerid_) != -1);
+  struct itimerspec its = {};
+  its.it_value.tv_sec = ms / 1000;
+  its.it_value.tv_nsec = 1000000L * (ms % 1000);
+  PERFETTO_CHECK(timer_settime(timerid_, 0, &its, nullptr) != -1);
+}
+
+Watchdog::Timer::~Timer() {
+  if (timerid_ != nullptr) {
+    timer_delete(timerid_);
+  }
+}
+
+Watchdog::Timer::Timer(Timer&& other) noexcept {
+  timerid_ = other.timerid_;
+  other.timerid_ = nullptr;
+}
+
+}  // namespace base
+}  // namespace perfetto
+
+#endif  // PERFETTO_OS_MACOSX
 // gen_amalgamated begin source: src/tracing/trace_writer_base.cc
 // gen_amalgamated begin header: include/perfetto/tracing/trace_writer_base.h
 // gen_amalgamated begin header: include/perfetto/protozero/message_handle.h
@@ -24484,6 +24865,236 @@ inline void FtraceConfig::set_drain_period_ms(::google::protobuf::uint32 value) 
 // @@protoc_insertion_point(global_scope)
 
 #endif  // PROTOBUF_perfetto_2fconfig_2fftrace_2fftrace_5fconfig_2eproto__INCLUDED
+// gen_amalgamated begin header: out/tmp.gen_amalgamated/gen/protos/perfetto/config/gpu/gpu_counter_config.pb.h
+// Generated by the protocol buffer compiler.  DO NOT EDIT!
+// source: perfetto/config/gpu/gpu_counter_config.proto
+
+#ifndef PROTOBUF_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto__INCLUDED
+#define PROTOBUF_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto__INCLUDED
+
+#include <string>
+
+#include <google/protobuf/stubs/common.h>
+
+#if GOOGLE_PROTOBUF_VERSION < 3000000
+#error This file was generated by a newer version of protoc which is
+#error incompatible with your Protocol Buffer headers.  Please update
+#error your headers.
+#endif
+#if 3000000 < GOOGLE_PROTOBUF_MIN_PROTOC_VERSION
+#error This file was generated by an older version of protoc which is
+#error incompatible with your Protocol Buffer headers.  Please
+#error regenerate this file with a newer version of protoc.
+#endif
+
+#include <google/protobuf/arena.h>
+#include <google/protobuf/arenastring.h>
+#include <google/protobuf/generated_message_util.h>
+#include <google/protobuf/message_lite.h>
+#include <google/protobuf/repeated_field.h>
+#include <google/protobuf/extension_set.h>
+// @@protoc_insertion_point(includes)
+
+namespace perfetto {
+namespace protos {
+
+// Internal implementation detail -- do not call these.
+void protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+void protobuf_AssignDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+void protobuf_ShutdownFile_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+
+class GpuCounterConfig;
+
+// ===================================================================
+
+class GpuCounterConfig : public ::google::protobuf::MessageLite {
+ public:
+  GpuCounterConfig();
+  virtual ~GpuCounterConfig();
+
+  GpuCounterConfig(const GpuCounterConfig& from);
+
+  inline GpuCounterConfig& operator=(const GpuCounterConfig& from) {
+    CopyFrom(from);
+    return *this;
+  }
+
+  inline const ::std::string& unknown_fields() const {
+    return _unknown_fields_.GetNoArena(
+        &::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  }
+
+  inline ::std::string* mutable_unknown_fields() {
+    return _unknown_fields_.MutableNoArena(
+        &::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  }
+
+  static const GpuCounterConfig& default_instance();
+
+  #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  // Returns the internal default instance pointer. This function can
+  // return NULL thus should not be used by the user. This is intended
+  // for Protobuf internal code. Please use default_instance() declared
+  // above instead.
+  static inline const GpuCounterConfig* internal_default_instance() {
+    return default_instance_;
+  }
+  #endif
+
+  void Swap(GpuCounterConfig* other);
+
+  // implements Message ----------------------------------------------
+
+  inline GpuCounterConfig* New() const { return New(NULL); }
+
+  GpuCounterConfig* New(::google::protobuf::Arena* arena) const;
+  void CheckTypeAndMergeFrom(const ::google::protobuf::MessageLite& from);
+  void CopyFrom(const GpuCounterConfig& from);
+  void MergeFrom(const GpuCounterConfig& from);
+  void Clear();
+  bool IsInitialized() const;
+
+  int ByteSize() const;
+  bool MergePartialFromCodedStream(
+      ::google::protobuf::io::CodedInputStream* input);
+  void SerializeWithCachedSizes(
+      ::google::protobuf::io::CodedOutputStream* output) const;
+  void DiscardUnknownFields();
+  int GetCachedSize() const { return _cached_size_; }
+  private:
+  void SharedCtor();
+  void SharedDtor();
+  void SetCachedSize(int size) const;
+  void InternalSwap(GpuCounterConfig* other);
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
+    return _arena_ptr_;
+  }
+  inline ::google::protobuf::Arena* MaybeArenaPtr() const {
+    return _arena_ptr_;
+  }
+  public:
+
+  ::std::string GetTypeName() const;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  // optional uint64 counter_period_ns = 1;
+  bool has_counter_period_ns() const;
+  void clear_counter_period_ns();
+  static const int kCounterPeriodNsFieldNumber = 1;
+  ::google::protobuf::uint64 counter_period_ns() const;
+  void set_counter_period_ns(::google::protobuf::uint64 value);
+
+  // repeated uint32 counter_ids = 2;
+  int counter_ids_size() const;
+  void clear_counter_ids();
+  static const int kCounterIdsFieldNumber = 2;
+  ::google::protobuf::uint32 counter_ids(int index) const;
+  void set_counter_ids(int index, ::google::protobuf::uint32 value);
+  void add_counter_ids(::google::protobuf::uint32 value);
+  const ::google::protobuf::RepeatedField< ::google::protobuf::uint32 >&
+      counter_ids() const;
+  ::google::protobuf::RepeatedField< ::google::protobuf::uint32 >*
+      mutable_counter_ids();
+
+  // @@protoc_insertion_point(class_scope:perfetto.protos.GpuCounterConfig)
+ private:
+  inline void set_has_counter_period_ns();
+  inline void clear_has_counter_period_ns();
+
+  ::google::protobuf::internal::ArenaStringPtr _unknown_fields_;
+  ::google::protobuf::Arena* _arena_ptr_;
+
+  ::google::protobuf::uint32 _has_bits_[1];
+  mutable int _cached_size_;
+  ::google::protobuf::uint64 counter_period_ns_;
+  ::google::protobuf::RepeatedField< ::google::protobuf::uint32 > counter_ids_;
+  #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  friend void  protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto_impl();
+  #else
+  friend void  protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+  #endif
+  friend void protobuf_AssignDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+  friend void protobuf_ShutdownFile_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+
+  void InitAsDefaultInstance();
+  static GpuCounterConfig* default_instance_;
+};
+// ===================================================================
+
+
+// ===================================================================
+
+#if !PROTOBUF_INLINE_NOT_IN_HEADERS
+// GpuCounterConfig
+
+// optional uint64 counter_period_ns = 1;
+inline bool GpuCounterConfig::has_counter_period_ns() const {
+  return (_has_bits_[0] & 0x00000001u) != 0;
+}
+inline void GpuCounterConfig::set_has_counter_period_ns() {
+  _has_bits_[0] |= 0x00000001u;
+}
+inline void GpuCounterConfig::clear_has_counter_period_ns() {
+  _has_bits_[0] &= ~0x00000001u;
+}
+inline void GpuCounterConfig::clear_counter_period_ns() {
+  counter_period_ns_ = GOOGLE_ULONGLONG(0);
+  clear_has_counter_period_ns();
+}
+inline ::google::protobuf::uint64 GpuCounterConfig::counter_period_ns() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterConfig.counter_period_ns)
+  return counter_period_ns_;
+}
+inline void GpuCounterConfig::set_counter_period_ns(::google::protobuf::uint64 value) {
+  set_has_counter_period_ns();
+  counter_period_ns_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterConfig.counter_period_ns)
+}
+
+// repeated uint32 counter_ids = 2;
+inline int GpuCounterConfig::counter_ids_size() const {
+  return counter_ids_.size();
+}
+inline void GpuCounterConfig::clear_counter_ids() {
+  counter_ids_.Clear();
+}
+inline ::google::protobuf::uint32 GpuCounterConfig::counter_ids(int index) const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterConfig.counter_ids)
+  return counter_ids_.Get(index);
+}
+inline void GpuCounterConfig::set_counter_ids(int index, ::google::protobuf::uint32 value) {
+  counter_ids_.Set(index, value);
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterConfig.counter_ids)
+}
+inline void GpuCounterConfig::add_counter_ids(::google::protobuf::uint32 value) {
+  counter_ids_.Add(value);
+  // @@protoc_insertion_point(field_add:perfetto.protos.GpuCounterConfig.counter_ids)
+}
+inline const ::google::protobuf::RepeatedField< ::google::protobuf::uint32 >&
+GpuCounterConfig::counter_ids() const {
+  // @@protoc_insertion_point(field_list:perfetto.protos.GpuCounterConfig.counter_ids)
+  return counter_ids_;
+}
+inline ::google::protobuf::RepeatedField< ::google::protobuf::uint32 >*
+GpuCounterConfig::mutable_counter_ids() {
+  // @@protoc_insertion_point(field_mutable_list:perfetto.protos.GpuCounterConfig.counter_ids)
+  return &counter_ids_;
+}
+
+#endif  // !PROTOBUF_INLINE_NOT_IN_HEADERS
+
+// @@protoc_insertion_point(namespace_scope)
+
+}  // namespace protos
+}  // namespace perfetto
+
+// @@protoc_insertion_point(global_scope)
+
+#endif  // PROTOBUF_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto__INCLUDED
 // gen_amalgamated begin header: out/tmp.gen_amalgamated/gen/protos/perfetto/config/inode_file/inode_file_config.pb.h
 // Generated by the protocol buffer compiler.  DO NOT EDIT!
 // source: perfetto/config/inode_file/inode_file_config.proto
@@ -28113,6 +28724,7 @@ inline void TestConfig::set_allocated_dummy_fields(::perfetto::protos::TestConfi
 // gen_amalgamated expanded: #include "perfetto/config/android/android_log_config.pb.h"
 // gen_amalgamated expanded: #include "perfetto/config/chrome/chrome_config.pb.h"
 // gen_amalgamated expanded: #include "perfetto/config/ftrace/ftrace_config.pb.h"
+// gen_amalgamated expanded: #include "perfetto/config/gpu/gpu_counter_config.pb.h"
 // gen_amalgamated expanded: #include "perfetto/config/inode_file/inode_file_config.pb.h"
 // gen_amalgamated expanded: #include "perfetto/config/power/android_power_config.pb.h"
 // gen_amalgamated expanded: #include "perfetto/config/process_stats/process_stats_config.pb.h"
@@ -28310,6 +28922,15 @@ class DataSourceConfig : public ::google::protobuf::MessageLite {
   ::perfetto::protos::AndroidLogConfig* release_android_log_config();
   void set_allocated_android_log_config(::perfetto::protos::AndroidLogConfig* android_log_config);
 
+  // optional .perfetto.protos.GpuCounterConfig gpu_counter_config = 108 [lazy = true];
+  bool has_gpu_counter_config() const;
+  void clear_gpu_counter_config();
+  static const int kGpuCounterConfigFieldNumber = 108;
+  const ::perfetto::protos::GpuCounterConfig& gpu_counter_config() const;
+  ::perfetto::protos::GpuCounterConfig* mutable_gpu_counter_config();
+  ::perfetto::protos::GpuCounterConfig* release_gpu_counter_config();
+  void set_allocated_gpu_counter_config(::perfetto::protos::GpuCounterConfig* gpu_counter_config);
+
   // optional .perfetto.protos.ChromeConfig chrome_config = 101;
   bool has_chrome_config() const;
   void clear_chrome_config();
@@ -28366,6 +28987,8 @@ class DataSourceConfig : public ::google::protobuf::MessageLite {
   inline void clear_has_android_power_config();
   inline void set_has_android_log_config();
   inline void clear_has_android_log_config();
+  inline void set_has_gpu_counter_config();
+  inline void clear_has_gpu_counter_config();
   inline void set_has_chrome_config();
   inline void clear_has_chrome_config();
   inline void set_has_legacy_config();
@@ -28389,6 +29012,7 @@ class DataSourceConfig : public ::google::protobuf::MessageLite {
   ::perfetto::protos::HeapprofdConfig* heapprofd_config_;
   ::perfetto::protos::AndroidPowerConfig* android_power_config_;
   ::perfetto::protos::AndroidLogConfig* android_log_config_;
+  ::perfetto::protos::GpuCounterConfig* gpu_counter_config_;
   ::perfetto::protos::ChromeConfig* chrome_config_;
   ::google::protobuf::internal::ArenaStringPtr legacy_config_;
   ::perfetto::protos::TestConfig* for_testing_;
@@ -28898,15 +29522,63 @@ inline void DataSourceConfig::set_allocated_android_log_config(::perfetto::proto
   // @@protoc_insertion_point(field_set_allocated:perfetto.protos.DataSourceConfig.android_log_config)
 }
 
-// optional .perfetto.protos.ChromeConfig chrome_config = 101;
-inline bool DataSourceConfig::has_chrome_config() const {
+// optional .perfetto.protos.GpuCounterConfig gpu_counter_config = 108 [lazy = true];
+inline bool DataSourceConfig::has_gpu_counter_config() const {
   return (_has_bits_[0] & 0x00001000u) != 0;
 }
-inline void DataSourceConfig::set_has_chrome_config() {
+inline void DataSourceConfig::set_has_gpu_counter_config() {
   _has_bits_[0] |= 0x00001000u;
 }
-inline void DataSourceConfig::clear_has_chrome_config() {
+inline void DataSourceConfig::clear_has_gpu_counter_config() {
   _has_bits_[0] &= ~0x00001000u;
+}
+inline void DataSourceConfig::clear_gpu_counter_config() {
+  if (gpu_counter_config_ != NULL) gpu_counter_config_->::perfetto::protos::GpuCounterConfig::Clear();
+  clear_has_gpu_counter_config();
+}
+inline const ::perfetto::protos::GpuCounterConfig& DataSourceConfig::gpu_counter_config() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.DataSourceConfig.gpu_counter_config)
+#ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  return gpu_counter_config_ != NULL ? *gpu_counter_config_ : *default_instance().gpu_counter_config_;
+#else
+  return gpu_counter_config_ != NULL ? *gpu_counter_config_ : *default_instance_->gpu_counter_config_;
+#endif
+}
+inline ::perfetto::protos::GpuCounterConfig* DataSourceConfig::mutable_gpu_counter_config() {
+  set_has_gpu_counter_config();
+  if (gpu_counter_config_ == NULL) {
+    gpu_counter_config_ = new ::perfetto::protos::GpuCounterConfig;
+  }
+  // @@protoc_insertion_point(field_mutable:perfetto.protos.DataSourceConfig.gpu_counter_config)
+  return gpu_counter_config_;
+}
+inline ::perfetto::protos::GpuCounterConfig* DataSourceConfig::release_gpu_counter_config() {
+  // @@protoc_insertion_point(field_release:perfetto.protos.DataSourceConfig.gpu_counter_config)
+  clear_has_gpu_counter_config();
+  ::perfetto::protos::GpuCounterConfig* temp = gpu_counter_config_;
+  gpu_counter_config_ = NULL;
+  return temp;
+}
+inline void DataSourceConfig::set_allocated_gpu_counter_config(::perfetto::protos::GpuCounterConfig* gpu_counter_config) {
+  delete gpu_counter_config_;
+  gpu_counter_config_ = gpu_counter_config;
+  if (gpu_counter_config) {
+    set_has_gpu_counter_config();
+  } else {
+    clear_has_gpu_counter_config();
+  }
+  // @@protoc_insertion_point(field_set_allocated:perfetto.protos.DataSourceConfig.gpu_counter_config)
+}
+
+// optional .perfetto.protos.ChromeConfig chrome_config = 101;
+inline bool DataSourceConfig::has_chrome_config() const {
+  return (_has_bits_[0] & 0x00002000u) != 0;
+}
+inline void DataSourceConfig::set_has_chrome_config() {
+  _has_bits_[0] |= 0x00002000u;
+}
+inline void DataSourceConfig::clear_has_chrome_config() {
+  _has_bits_[0] &= ~0x00002000u;
 }
 inline void DataSourceConfig::clear_chrome_config() {
   if (chrome_config_ != NULL) chrome_config_->::perfetto::protos::ChromeConfig::Clear();
@@ -28948,13 +29620,13 @@ inline void DataSourceConfig::set_allocated_chrome_config(::perfetto::protos::Ch
 
 // optional string legacy_config = 1000;
 inline bool DataSourceConfig::has_legacy_config() const {
-  return (_has_bits_[0] & 0x00002000u) != 0;
+  return (_has_bits_[0] & 0x00004000u) != 0;
 }
 inline void DataSourceConfig::set_has_legacy_config() {
-  _has_bits_[0] |= 0x00002000u;
+  _has_bits_[0] |= 0x00004000u;
 }
 inline void DataSourceConfig::clear_has_legacy_config() {
-  _has_bits_[0] &= ~0x00002000u;
+  _has_bits_[0] &= ~0x00004000u;
 }
 inline void DataSourceConfig::clear_legacy_config() {
   legacy_config_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
@@ -29002,13 +29674,13 @@ inline void DataSourceConfig::set_allocated_legacy_config(::std::string* legacy_
 
 // optional .perfetto.protos.TestConfig for_testing = 1001;
 inline bool DataSourceConfig::has_for_testing() const {
-  return (_has_bits_[0] & 0x00004000u) != 0;
+  return (_has_bits_[0] & 0x00008000u) != 0;
 }
 inline void DataSourceConfig::set_has_for_testing() {
-  _has_bits_[0] |= 0x00004000u;
+  _has_bits_[0] |= 0x00008000u;
 }
 inline void DataSourceConfig::clear_has_for_testing() {
-  _has_bits_[0] &= ~0x00004000u;
+  _has_bits_[0] &= ~0x00008000u;
 }
 inline void DataSourceConfig::clear_for_testing() {
   if (for_testing_ != NULL) for_testing_->::perfetto::protos::TestConfig::Clear();
@@ -29096,6 +29768,7 @@ void protobuf_AddDesc_perfetto_2fconfig_2fdata_5fsource_5fconfig_2eproto() {
   ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2fandroid_2fandroid_5flog_5fconfig_2eproto();
   ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2fchrome_2fchrome_5fconfig_2eproto();
   ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2fftrace_2fftrace_5fconfig_2eproto();
+  ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
   ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2finode_5ffile_2finode_5ffile_5fconfig_2eproto();
   ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2fpower_2fandroid_5fpower_5fconfig_2eproto();
   ::perfetto::protos::protobuf_AddDesc_perfetto_2fconfig_2fprocess_5fstats_2fprocess_5fstats_5fconfig_2eproto();
@@ -29152,6 +29825,7 @@ const int DataSourceConfig::kSysStatsConfigFieldNumber;
 const int DataSourceConfig::kHeapprofdConfigFieldNumber;
 const int DataSourceConfig::kAndroidPowerConfigFieldNumber;
 const int DataSourceConfig::kAndroidLogConfigFieldNumber;
+const int DataSourceConfig::kGpuCounterConfigFieldNumber;
 const int DataSourceConfig::kChromeConfigFieldNumber;
 const int DataSourceConfig::kLegacyConfigFieldNumber;
 const int DataSourceConfig::kForTestingFieldNumber;
@@ -29207,6 +29881,12 @@ void DataSourceConfig::InitAsDefaultInstance() {
   android_log_config_ = const_cast< ::perfetto::protos::AndroidLogConfig*>(&::perfetto::protos::AndroidLogConfig::default_instance());
 #endif
 #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  gpu_counter_config_ = const_cast< ::perfetto::protos::GpuCounterConfig*>(
+      ::perfetto::protos::GpuCounterConfig::internal_default_instance());
+#else
+  gpu_counter_config_ = const_cast< ::perfetto::protos::GpuCounterConfig*>(&::perfetto::protos::GpuCounterConfig::default_instance());
+#endif
+#ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
   chrome_config_ = const_cast< ::perfetto::protos::ChromeConfig*>(
       ::perfetto::protos::ChromeConfig::internal_default_instance());
 #else
@@ -29245,6 +29925,7 @@ void DataSourceConfig::SharedCtor() {
   heapprofd_config_ = NULL;
   android_power_config_ = NULL;
   android_log_config_ = NULL;
+  gpu_counter_config_ = NULL;
   chrome_config_ = NULL;
   legacy_config_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
   for_testing_ = NULL;
@@ -29273,6 +29954,7 @@ void DataSourceConfig::SharedDtor() {
     delete heapprofd_config_;
     delete android_power_config_;
     delete android_log_config_;
+    delete gpu_counter_config_;
     delete chrome_config_;
     delete for_testing_;
   }
@@ -29336,7 +30018,7 @@ void DataSourceConfig::Clear() {
       if (process_stats_config_ != NULL) process_stats_config_->::perfetto::protos::ProcessStatsConfig::Clear();
     }
   }
-  if (_has_bits_[8 / 32] & 32512u) {
+  if (_has_bits_[8 / 32] & 65280u) {
     if (has_sys_stats_config()) {
       if (sys_stats_config_ != NULL) sys_stats_config_->::perfetto::protos::SysStatsConfig::Clear();
     }
@@ -29348,6 +30030,9 @@ void DataSourceConfig::Clear() {
     }
     if (has_android_log_config()) {
       if (android_log_config_ != NULL) android_log_config_->::perfetto::protos::AndroidLogConfig::Clear();
+    }
+    if (has_gpu_counter_config()) {
+      if (gpu_counter_config_ != NULL) gpu_counter_config_->::perfetto::protos::GpuCounterConfig::Clear();
     }
     if (has_chrome_config()) {
       if (chrome_config_ != NULL) chrome_config_->::perfetto::protos::ChromeConfig::Clear();
@@ -29555,6 +30240,19 @@ bool DataSourceConfig::MergePartialFromCodedStream(
         } else {
           goto handle_unusual;
         }
+        if (input->ExpectTag(866)) goto parse_gpu_counter_config;
+        break;
+      }
+
+      // optional .perfetto.protos.GpuCounterConfig gpu_counter_config = 108 [lazy = true];
+      case 108: {
+        if (tag == 866) {
+         parse_gpu_counter_config:
+          DO_(::google::protobuf::internal::WireFormatLite::ReadMessageNoVirtual(
+               input, mutable_gpu_counter_config()));
+        } else {
+          goto handle_unusual;
+        }
         if (input->ExpectTag(8002)) goto parse_legacy_config;
         break;
       }
@@ -29684,6 +30382,12 @@ void DataSourceConfig::SerializeWithCachedSizes(
       107, *this->android_log_config_, output);
   }
 
+  // optional .perfetto.protos.GpuCounterConfig gpu_counter_config = 108 [lazy = true];
+  if (has_gpu_counter_config()) {
+    ::google::protobuf::internal::WireFormatLite::WriteMessage(
+      108, *this->gpu_counter_config_, output);
+  }
+
   // optional string legacy_config = 1000;
   if (has_legacy_config()) {
     ::google::protobuf::internal::WireFormatLite::WriteStringMaybeAliased(
@@ -29761,7 +30465,7 @@ int DataSourceConfig::ByteSize() const {
     }
 
   }
-  if (_has_bits_[8 / 32] & 32512u) {
+  if (_has_bits_[8 / 32] & 65280u) {
     // optional .perfetto.protos.SysStatsConfig sys_stats_config = 104 [lazy = true];
     if (has_sys_stats_config()) {
       total_size += 2 +
@@ -29788,6 +30492,13 @@ int DataSourceConfig::ByteSize() const {
       total_size += 2 +
         ::google::protobuf::internal::WireFormatLite::MessageSizeNoVirtual(
           *this->android_log_config_);
+    }
+
+    // optional .perfetto.protos.GpuCounterConfig gpu_counter_config = 108 [lazy = true];
+    if (has_gpu_counter_config()) {
+      total_size += 2 +
+        ::google::protobuf::internal::WireFormatLite::MessageSizeNoVirtual(
+          *this->gpu_counter_config_);
     }
 
     // optional .perfetto.protos.ChromeConfig chrome_config = 101;
@@ -29868,6 +30579,9 @@ void DataSourceConfig::MergeFrom(const DataSourceConfig& from) {
     if (from.has_android_log_config()) {
       mutable_android_log_config()->::perfetto::protos::AndroidLogConfig::MergeFrom(from.android_log_config());
     }
+    if (from.has_gpu_counter_config()) {
+      mutable_gpu_counter_config()->::perfetto::protos::GpuCounterConfig::MergeFrom(from.gpu_counter_config());
+    }
     if (from.has_chrome_config()) {
       mutable_chrome_config()->::perfetto::protos::ChromeConfig::MergeFrom(from.chrome_config());
     }
@@ -29913,6 +30627,7 @@ void DataSourceConfig::InternalSwap(DataSourceConfig* other) {
   std::swap(heapprofd_config_, other->heapprofd_config_);
   std::swap(android_power_config_, other->android_power_config_);
   std::swap(android_log_config_, other->android_log_config_);
+  std::swap(gpu_counter_config_, other->gpu_counter_config_);
   std::swap(chrome_config_, other->chrome_config_);
   legacy_config_.Swap(&other->legacy_config_);
   std::swap(for_testing_, other->for_testing_);
@@ -30414,15 +31129,63 @@ void DataSourceConfig::set_allocated_android_log_config(::perfetto::protos::Andr
   // @@protoc_insertion_point(field_set_allocated:perfetto.protos.DataSourceConfig.android_log_config)
 }
 
-// optional .perfetto.protos.ChromeConfig chrome_config = 101;
-bool DataSourceConfig::has_chrome_config() const {
+// optional .perfetto.protos.GpuCounterConfig gpu_counter_config = 108 [lazy = true];
+bool DataSourceConfig::has_gpu_counter_config() const {
   return (_has_bits_[0] & 0x00001000u) != 0;
 }
-void DataSourceConfig::set_has_chrome_config() {
+void DataSourceConfig::set_has_gpu_counter_config() {
   _has_bits_[0] |= 0x00001000u;
 }
-void DataSourceConfig::clear_has_chrome_config() {
+void DataSourceConfig::clear_has_gpu_counter_config() {
   _has_bits_[0] &= ~0x00001000u;
+}
+void DataSourceConfig::clear_gpu_counter_config() {
+  if (gpu_counter_config_ != NULL) gpu_counter_config_->::perfetto::protos::GpuCounterConfig::Clear();
+  clear_has_gpu_counter_config();
+}
+const ::perfetto::protos::GpuCounterConfig& DataSourceConfig::gpu_counter_config() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.DataSourceConfig.gpu_counter_config)
+#ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  return gpu_counter_config_ != NULL ? *gpu_counter_config_ : *default_instance().gpu_counter_config_;
+#else
+  return gpu_counter_config_ != NULL ? *gpu_counter_config_ : *default_instance_->gpu_counter_config_;
+#endif
+}
+::perfetto::protos::GpuCounterConfig* DataSourceConfig::mutable_gpu_counter_config() {
+  set_has_gpu_counter_config();
+  if (gpu_counter_config_ == NULL) {
+    gpu_counter_config_ = new ::perfetto::protos::GpuCounterConfig;
+  }
+  // @@protoc_insertion_point(field_mutable:perfetto.protos.DataSourceConfig.gpu_counter_config)
+  return gpu_counter_config_;
+}
+::perfetto::protos::GpuCounterConfig* DataSourceConfig::release_gpu_counter_config() {
+  // @@protoc_insertion_point(field_release:perfetto.protos.DataSourceConfig.gpu_counter_config)
+  clear_has_gpu_counter_config();
+  ::perfetto::protos::GpuCounterConfig* temp = gpu_counter_config_;
+  gpu_counter_config_ = NULL;
+  return temp;
+}
+void DataSourceConfig::set_allocated_gpu_counter_config(::perfetto::protos::GpuCounterConfig* gpu_counter_config) {
+  delete gpu_counter_config_;
+  gpu_counter_config_ = gpu_counter_config;
+  if (gpu_counter_config) {
+    set_has_gpu_counter_config();
+  } else {
+    clear_has_gpu_counter_config();
+  }
+  // @@protoc_insertion_point(field_set_allocated:perfetto.protos.DataSourceConfig.gpu_counter_config)
+}
+
+// optional .perfetto.protos.ChromeConfig chrome_config = 101;
+bool DataSourceConfig::has_chrome_config() const {
+  return (_has_bits_[0] & 0x00002000u) != 0;
+}
+void DataSourceConfig::set_has_chrome_config() {
+  _has_bits_[0] |= 0x00002000u;
+}
+void DataSourceConfig::clear_has_chrome_config() {
+  _has_bits_[0] &= ~0x00002000u;
 }
 void DataSourceConfig::clear_chrome_config() {
   if (chrome_config_ != NULL) chrome_config_->::perfetto::protos::ChromeConfig::Clear();
@@ -30464,13 +31227,13 @@ void DataSourceConfig::set_allocated_chrome_config(::perfetto::protos::ChromeCon
 
 // optional string legacy_config = 1000;
 bool DataSourceConfig::has_legacy_config() const {
-  return (_has_bits_[0] & 0x00002000u) != 0;
+  return (_has_bits_[0] & 0x00004000u) != 0;
 }
 void DataSourceConfig::set_has_legacy_config() {
-  _has_bits_[0] |= 0x00002000u;
+  _has_bits_[0] |= 0x00004000u;
 }
 void DataSourceConfig::clear_has_legacy_config() {
-  _has_bits_[0] &= ~0x00002000u;
+  _has_bits_[0] &= ~0x00004000u;
 }
 void DataSourceConfig::clear_legacy_config() {
   legacy_config_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
@@ -30518,13 +31281,13 @@ void DataSourceConfig::clear_legacy_config() {
 
 // optional .perfetto.protos.TestConfig for_testing = 1001;
 bool DataSourceConfig::has_for_testing() const {
-  return (_has_bits_[0] & 0x00004000u) != 0;
+  return (_has_bits_[0] & 0x00008000u) != 0;
 }
 void DataSourceConfig::set_has_for_testing() {
-  _has_bits_[0] |= 0x00004000u;
+  _has_bits_[0] |= 0x00008000u;
 }
 void DataSourceConfig::clear_has_for_testing() {
-  _has_bits_[0] &= ~0x00004000u;
+  _has_bits_[0] &= ~0x00008000u;
 }
 void DataSourceConfig::clear_for_testing() {
   if (for_testing_ != NULL) for_testing_->::perfetto::protos::TestConfig::Clear();
@@ -31214,6 +31977,389 @@ void FtraceConfig::clear_drain_period_ms() {
   set_has_drain_period_ms();
   drain_period_ms_ = value;
   // @@protoc_insertion_point(field_set:perfetto.protos.FtraceConfig.drain_period_ms)
+}
+
+#endif  // PROTOBUF_INLINE_NOT_IN_HEADERS
+
+// @@protoc_insertion_point(namespace_scope)
+
+}  // namespace protos
+}  // namespace perfetto
+
+// @@protoc_insertion_point(global_scope)
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/gpu/gpu_counter_config.pb.cc
+// Generated by the protocol buffer compiler.  DO NOT EDIT!
+// source: perfetto/config/gpu/gpu_counter_config.proto
+
+#define INTERNAL_SUPPRESS_PROTOBUF_FIELD_DEPRECATION
+// gen_amalgamated expanded: #include "perfetto/config/gpu/gpu_counter_config.pb.h"
+
+#include <algorithm>
+
+#include <google/protobuf/stubs/common.h>
+#include <google/protobuf/stubs/port.h>
+#include <google/protobuf/stubs/once.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/wire_format_lite_inl.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+// @@protoc_insertion_point(includes)
+
+namespace perfetto {
+namespace protos {
+
+void protobuf_ShutdownFile_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto() {
+  delete GpuCounterConfig::default_instance_;
+}
+
+#ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+void protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto_impl() {
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+#else
+void protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto() {
+  static bool already_here = false;
+  if (already_here) return;
+  already_here = true;
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+#endif
+  GpuCounterConfig::default_instance_ = new GpuCounterConfig();
+  GpuCounterConfig::default_instance_->InitAsDefaultInstance();
+  ::google::protobuf::internal::OnShutdown(&protobuf_ShutdownFile_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto);
+}
+
+#ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+GOOGLE_PROTOBUF_DECLARE_ONCE(protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto_once_);
+void protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto() {
+  ::google::protobuf::GoogleOnceInit(&protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto_once_,
+                 &protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto_impl);
+}
+#else
+// Force AddDescriptors() to be called at static initialization time.
+struct StaticDescriptorInitializer_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto {
+  StaticDescriptorInitializer_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto() {
+    protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+  }
+} static_descriptor_initializer_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto_;
+#endif
+
+namespace {
+
+static void gpu_counter_config_pb_MergeFromFail(int line) GOOGLE_ATTRIBUTE_COLD;
+static void gpu_counter_config_pb_MergeFromFail(int line) {
+  GOOGLE_CHECK(false) << __FILE__ << ":" << line;
+}
+
+}  // namespace
+
+
+// ===================================================================
+
+static ::std::string* MutableUnknownFieldsForGpuCounterConfig(
+    GpuCounterConfig* ptr) {
+  return ptr->mutable_unknown_fields();
+}
+
+#if !defined(_MSC_VER) || _MSC_VER >= 1900
+const int GpuCounterConfig::kCounterPeriodNsFieldNumber;
+const int GpuCounterConfig::kCounterIdsFieldNumber;
+#endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
+
+GpuCounterConfig::GpuCounterConfig()
+  : ::google::protobuf::MessageLite(), _arena_ptr_(NULL) {
+  SharedCtor();
+  // @@protoc_insertion_point(constructor:perfetto.protos.GpuCounterConfig)
+}
+
+void GpuCounterConfig::InitAsDefaultInstance() {
+}
+
+GpuCounterConfig::GpuCounterConfig(const GpuCounterConfig& from)
+  : ::google::protobuf::MessageLite(),
+    _arena_ptr_(NULL) {
+  SharedCtor();
+  MergeFrom(from);
+  // @@protoc_insertion_point(copy_constructor:perfetto.protos.GpuCounterConfig)
+}
+
+void GpuCounterConfig::SharedCtor() {
+  ::google::protobuf::internal::GetEmptyString();
+  _cached_size_ = 0;
+  _unknown_fields_.UnsafeSetDefault(
+      &::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  counter_period_ns_ = GOOGLE_ULONGLONG(0);
+  ::memset(_has_bits_, 0, sizeof(_has_bits_));
+}
+
+GpuCounterConfig::~GpuCounterConfig() {
+  // @@protoc_insertion_point(destructor:perfetto.protos.GpuCounterConfig)
+  SharedDtor();
+}
+
+void GpuCounterConfig::SharedDtor() {
+  _unknown_fields_.DestroyNoArena(
+      &::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  if (this != &default_instance()) {
+  #else
+  if (this != default_instance_) {
+  #endif
+  }
+}
+
+void GpuCounterConfig::SetCachedSize(int size) const {
+  GOOGLE_SAFE_CONCURRENT_WRITES_BEGIN();
+  _cached_size_ = size;
+  GOOGLE_SAFE_CONCURRENT_WRITES_END();
+}
+const GpuCounterConfig& GpuCounterConfig::default_instance() {
+#ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
+  protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+#else
+  if (default_instance_ == NULL) protobuf_AddDesc_perfetto_2fconfig_2fgpu_2fgpu_5fcounter_5fconfig_2eproto();
+#endif
+  return *default_instance_;
+}
+
+GpuCounterConfig* GpuCounterConfig::default_instance_ = NULL;
+
+GpuCounterConfig* GpuCounterConfig::New(::google::protobuf::Arena* arena) const {
+  GpuCounterConfig* n = new GpuCounterConfig;
+  if (arena != NULL) {
+    arena->Own(n);
+  }
+  return n;
+}
+
+void GpuCounterConfig::Clear() {
+// @@protoc_insertion_point(message_clear_start:perfetto.protos.GpuCounterConfig)
+  counter_period_ns_ = GOOGLE_ULONGLONG(0);
+  counter_ids_.Clear();
+  ::memset(_has_bits_, 0, sizeof(_has_bits_));
+  _unknown_fields_.ClearToEmptyNoArena(
+      &::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+
+bool GpuCounterConfig::MergePartialFromCodedStream(
+    ::google::protobuf::io::CodedInputStream* input) {
+#define DO_(EXPRESSION) if (!GOOGLE_PREDICT_TRUE(EXPRESSION)) goto failure
+  ::google::protobuf::uint32 tag;
+  ::google::protobuf::io::LazyStringOutputStream unknown_fields_string(
+      ::google::protobuf::internal::NewPermanentCallback(
+          &MutableUnknownFieldsForGpuCounterConfig, this));
+  ::google::protobuf::io::CodedOutputStream unknown_fields_stream(
+      &unknown_fields_string, false);
+  // @@protoc_insertion_point(parse_start:perfetto.protos.GpuCounterConfig)
+  for (;;) {
+    ::std::pair< ::google::protobuf::uint32, bool> p = input->ReadTagWithCutoff(127);
+    tag = p.first;
+    if (!p.second) goto handle_unusual;
+    switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
+      // optional uint64 counter_period_ns = 1;
+      case 1: {
+        if (tag == 8) {
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
+                   ::google::protobuf::uint64, ::google::protobuf::internal::WireFormatLite::TYPE_UINT64>(
+                 input, &counter_period_ns_)));
+          set_has_counter_period_ns();
+        } else {
+          goto handle_unusual;
+        }
+        if (input->ExpectTag(16)) goto parse_counter_ids;
+        break;
+      }
+
+      // repeated uint32 counter_ids = 2;
+      case 2: {
+        if (tag == 16) {
+         parse_counter_ids:
+          DO_((::google::protobuf::internal::WireFormatLite::ReadRepeatedPrimitive<
+                   ::google::protobuf::uint32, ::google::protobuf::internal::WireFormatLite::TYPE_UINT32>(
+                 1, 16, input, this->mutable_counter_ids())));
+        } else if (tag == 18) {
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPackedPrimitiveNoInline<
+                   ::google::protobuf::uint32, ::google::protobuf::internal::WireFormatLite::TYPE_UINT32>(
+                 input, this->mutable_counter_ids())));
+        } else {
+          goto handle_unusual;
+        }
+        if (input->ExpectTag(16)) goto parse_counter_ids;
+        if (input->ExpectAtEnd()) goto success;
+        break;
+      }
+
+      default: {
+      handle_unusual:
+        if (tag == 0 ||
+            ::google::protobuf::internal::WireFormatLite::GetTagWireType(tag) ==
+            ::google::protobuf::internal::WireFormatLite::WIRETYPE_END_GROUP) {
+          goto success;
+        }
+        DO_(::google::protobuf::internal::WireFormatLite::SkipField(
+            input, tag, &unknown_fields_stream));
+        break;
+      }
+    }
+  }
+success:
+  // @@protoc_insertion_point(parse_success:perfetto.protos.GpuCounterConfig)
+  return true;
+failure:
+  // @@protoc_insertion_point(parse_failure:perfetto.protos.GpuCounterConfig)
+  return false;
+#undef DO_
+}
+
+void GpuCounterConfig::SerializeWithCachedSizes(
+    ::google::protobuf::io::CodedOutputStream* output) const {
+  // @@protoc_insertion_point(serialize_start:perfetto.protos.GpuCounterConfig)
+  // optional uint64 counter_period_ns = 1;
+  if (has_counter_period_ns()) {
+    ::google::protobuf::internal::WireFormatLite::WriteUInt64(1, this->counter_period_ns(), output);
+  }
+
+  // repeated uint32 counter_ids = 2;
+  for (int i = 0; i < this->counter_ids_size(); i++) {
+    ::google::protobuf::internal::WireFormatLite::WriteUInt32(
+      2, this->counter_ids(i), output);
+  }
+
+  output->WriteRaw(unknown_fields().data(),
+                   static_cast<int>(unknown_fields().size()));
+  // @@protoc_insertion_point(serialize_end:perfetto.protos.GpuCounterConfig)
+}
+
+int GpuCounterConfig::ByteSize() const {
+// @@protoc_insertion_point(message_byte_size_start:perfetto.protos.GpuCounterConfig)
+  int total_size = 0;
+
+  // optional uint64 counter_period_ns = 1;
+  if (has_counter_period_ns()) {
+    total_size += 1 +
+      ::google::protobuf::internal::WireFormatLite::UInt64Size(
+        this->counter_period_ns());
+  }
+
+  // repeated uint32 counter_ids = 2;
+  {
+    int data_size = 0;
+    for (int i = 0; i < this->counter_ids_size(); i++) {
+      data_size += ::google::protobuf::internal::WireFormatLite::
+        UInt32Size(this->counter_ids(i));
+    }
+    total_size += 1 * this->counter_ids_size() + data_size;
+  }
+
+  total_size += unknown_fields().size();
+
+  GOOGLE_SAFE_CONCURRENT_WRITES_BEGIN();
+  _cached_size_ = total_size;
+  GOOGLE_SAFE_CONCURRENT_WRITES_END();
+  return total_size;
+}
+
+void GpuCounterConfig::CheckTypeAndMergeFrom(
+    const ::google::protobuf::MessageLite& from) {
+  MergeFrom(*::google::protobuf::down_cast<const GpuCounterConfig*>(&from));
+}
+
+void GpuCounterConfig::MergeFrom(const GpuCounterConfig& from) {
+// @@protoc_insertion_point(class_specific_merge_from_start:perfetto.protos.GpuCounterConfig)
+  if (GOOGLE_PREDICT_FALSE(&from == this)) gpu_counter_config_pb_MergeFromFail(__LINE__);
+  counter_ids_.MergeFrom(from.counter_ids_);
+  if (from._has_bits_[0 / 32] & (0xffu << (0 % 32))) {
+    if (from.has_counter_period_ns()) {
+      set_counter_period_ns(from.counter_period_ns());
+    }
+  }
+  if (!from.unknown_fields().empty()) {
+    mutable_unknown_fields()->append(from.unknown_fields());
+  }
+}
+
+void GpuCounterConfig::CopyFrom(const GpuCounterConfig& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:perfetto.protos.GpuCounterConfig)
+  if (&from == this) return;
+  Clear();
+  MergeFrom(from);
+}
+
+bool GpuCounterConfig::IsInitialized() const {
+
+  return true;
+}
+
+void GpuCounterConfig::Swap(GpuCounterConfig* other) {
+  if (other == this) return;
+  InternalSwap(other);
+}
+void GpuCounterConfig::InternalSwap(GpuCounterConfig* other) {
+  std::swap(counter_period_ns_, other->counter_period_ns_);
+  counter_ids_.UnsafeArenaSwap(&other->counter_ids_);
+  std::swap(_has_bits_[0], other->_has_bits_[0]);
+  _unknown_fields_.Swap(&other->_unknown_fields_);
+  std::swap(_cached_size_, other->_cached_size_);
+}
+
+::std::string GpuCounterConfig::GetTypeName() const {
+  return "perfetto.protos.GpuCounterConfig";
+}
+
+#if PROTOBUF_INLINE_NOT_IN_HEADERS
+// GpuCounterConfig
+
+// optional uint64 counter_period_ns = 1;
+bool GpuCounterConfig::has_counter_period_ns() const {
+  return (_has_bits_[0] & 0x00000001u) != 0;
+}
+void GpuCounterConfig::set_has_counter_period_ns() {
+  _has_bits_[0] |= 0x00000001u;
+}
+void GpuCounterConfig::clear_has_counter_period_ns() {
+  _has_bits_[0] &= ~0x00000001u;
+}
+void GpuCounterConfig::clear_counter_period_ns() {
+  counter_period_ns_ = GOOGLE_ULONGLONG(0);
+  clear_has_counter_period_ns();
+}
+ ::google::protobuf::uint64 GpuCounterConfig::counter_period_ns() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterConfig.counter_period_ns)
+  return counter_period_ns_;
+}
+ void GpuCounterConfig::set_counter_period_ns(::google::protobuf::uint64 value) {
+  set_has_counter_period_ns();
+  counter_period_ns_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterConfig.counter_period_ns)
+}
+
+// repeated uint32 counter_ids = 2;
+int GpuCounterConfig::counter_ids_size() const {
+  return counter_ids_.size();
+}
+void GpuCounterConfig::clear_counter_ids() {
+  counter_ids_.Clear();
+}
+ ::google::protobuf::uint32 GpuCounterConfig::counter_ids(int index) const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterConfig.counter_ids)
+  return counter_ids_.Get(index);
+}
+ void GpuCounterConfig::set_counter_ids(int index, ::google::protobuf::uint32 value) {
+  counter_ids_.Set(index, value);
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterConfig.counter_ids)
+}
+ void GpuCounterConfig::add_counter_ids(::google::protobuf::uint32 value) {
+  counter_ids_.Add(value);
+  // @@protoc_insertion_point(field_add:perfetto.protos.GpuCounterConfig.counter_ids)
+}
+ const ::google::protobuf::RepeatedField< ::google::protobuf::uint32 >&
+GpuCounterConfig::counter_ids() const {
+  // @@protoc_insertion_point(field_list:perfetto.protos.GpuCounterConfig.counter_ids)
+  return counter_ids_;
+}
+ ::google::protobuf::RepeatedField< ::google::protobuf::uint32 >*
+GpuCounterConfig::mutable_counter_ids() {
+  // @@protoc_insertion_point(field_mutable_list:perfetto.protos.GpuCounterConfig.counter_ids)
+  return &counter_ids_;
 }
 
 #endif  // PROTOBUF_INLINE_NOT_IN_HEADERS
@@ -81757,6 +82903,8 @@ TrustedPacket::OptionalTrustedPacketSequenceIdCase TrustedPacket::optional_trust
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/ftrace/ftrace_config.pbzero.cc
 // Intentionally empty
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/gpu/gpu_counter_config.pbzero.cc
+// Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/inode_file/inode_file_config.pbzero.cc
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/power/android_power_config.pbzero.cc
@@ -81864,6 +83012,10 @@ TrustedPacket::OptionalTrustedPacketSequenceIdCase TrustedPacket::optional_trust
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/vmscan.pbzero.cc
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/workqueue.pbzero.cc
+// Intentionally empty
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/gpu/gpu_counter_event.pbzero.cc
+// Intentionally empty
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/gpu/gpu_render_stage_event.pbzero.cc
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/power/battery_counters.pbzero.cc
 // Intentionally empty
@@ -83804,6 +84956,8 @@ class ChromeMetadataPacket;
 class ClockSnapshot;
 class FtraceEventBundle;
 class FtraceStats;
+class GpuCounterEvent;
+class GpuRenderStageEvent;
 class InodeFileMap;
 class InternedData;
 class PackagesList;
@@ -83847,6 +85001,8 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
     kChromeBenchmarkMetadataFieldNumber = 48,
     kPerfettoMetatraceFieldNumber = 49,
     kChromeMetadataFieldNumber = 51,
+    kGpuCounterEventFieldNumber = 52,
+    kGpuRenderStageEventFieldNumber = 53,
     kProcessDescriptorFieldNumber = 43,
     kThreadDescriptorFieldNumber = 44,
     kSynchronizationMarkerFieldNumber = 36,
@@ -83907,6 +85063,10 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
     ::protozero::ConstBytes perfetto_metatrace() const { return at<49>().as_bytes(); }
     bool has_chrome_metadata() const { return at<51>().valid(); }
     ::protozero::ConstBytes chrome_metadata() const { return at<51>().as_bytes(); }
+    bool has_gpu_counter_event() const { return at<52>().valid(); }
+    ::protozero::ConstBytes gpu_counter_event() const { return at<52>().as_bytes(); }
+    bool has_gpu_render_stage_event() const { return at<53>().valid(); }
+    ::protozero::ConstBytes gpu_render_stage_event() const { return at<53>().as_bytes(); }
     bool has_process_descriptor() const { return at<43>().valid(); }
     ::protozero::ConstBytes process_descriptor() const { return at<43>().as_bytes(); }
     bool has_thread_descriptor() const { return at<44>().valid(); }
@@ -84013,6 +85173,14 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
 
   template <typename T = ChromeMetadataPacket> T* set_chrome_metadata() {
     return BeginNestedMessage<T>(51);
+  }
+
+  template <typename T = GpuCounterEvent> T* set_gpu_counter_event() {
+    return BeginNestedMessage<T>(52);
+  }
+
+  template <typename T = GpuRenderStageEvent> T* set_gpu_render_stage_event() {
+    return BeginNestedMessage<T>(53);
   }
 
   template <typename T = ProcessDescriptor> T* set_process_descriptor() {

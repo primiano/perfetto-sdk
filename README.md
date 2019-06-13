@@ -15,10 +15,10 @@ The perfetto SDK consists of:
 See also:
 [Perefetto public API surface](https://android.googlesource.com/platform/external/perfetto/+/refs/heads/master/include/README.md)
 
-
->  The amalgamated source has been generated via `tools/gen_amalgamated`  
->  Repo: https://android.googlesource.com/platform/external/perfettos  
->  Git revision: 0b2e12b08cdcb8be58c992c8702cee90e0420324  
+>  The amalgamated source has been generated via
+>  `tools/gen_amalgamated --gn_args 'target_os="android" target_cpu="arm64" is_debug=false'` 
+>
+>  Perfetto revision: https://android.googlesource.com/platform/external/perfetto/+/6b5210e9dfb6bbf58d62d0010e3369e95cd13085
 
 # Usage:
 

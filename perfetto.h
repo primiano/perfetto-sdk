@@ -2902,6 +2902,8 @@ class ChromeMetadataPacket;
 class ClockSnapshot;
 class FtraceEventBundle;
 class FtraceStats;
+class GpuCounterEvent;
+class GpuRenderStageEvent;
 class InodeFileMap;
 class InternedData;
 class PackagesList;
@@ -2945,6 +2947,8 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
     kChromeBenchmarkMetadataFieldNumber = 48,
     kPerfettoMetatraceFieldNumber = 49,
     kChromeMetadataFieldNumber = 51,
+    kGpuCounterEventFieldNumber = 52,
+    kGpuRenderStageEventFieldNumber = 53,
     kProcessDescriptorFieldNumber = 43,
     kThreadDescriptorFieldNumber = 44,
     kSynchronizationMarkerFieldNumber = 36,
@@ -3005,6 +3009,10 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
     ::protozero::ConstBytes perfetto_metatrace() const { return at<49>().as_bytes(); }
     bool has_chrome_metadata() const { return at<51>().valid(); }
     ::protozero::ConstBytes chrome_metadata() const { return at<51>().as_bytes(); }
+    bool has_gpu_counter_event() const { return at<52>().valid(); }
+    ::protozero::ConstBytes gpu_counter_event() const { return at<52>().as_bytes(); }
+    bool has_gpu_render_stage_event() const { return at<53>().valid(); }
+    ::protozero::ConstBytes gpu_render_stage_event() const { return at<53>().as_bytes(); }
     bool has_process_descriptor() const { return at<43>().valid(); }
     ::protozero::ConstBytes process_descriptor() const { return at<43>().as_bytes(); }
     bool has_thread_descriptor() const { return at<44>().valid(); }
@@ -3111,6 +3119,14 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
 
   template <typename T = ChromeMetadataPacket> T* set_chrome_metadata() {
     return BeginNestedMessage<T>(51);
+  }
+
+  template <typename T = GpuCounterEvent> T* set_gpu_counter_event() {
+    return BeginNestedMessage<T>(52);
+  }
+
+  template <typename T = GpuRenderStageEvent> T* set_gpu_render_stage_event() {
+    return BeginNestedMessage<T>(53);
   }
 
   template <typename T = ProcessDescriptor> T* set_process_descriptor() {
@@ -4570,6 +4586,8 @@ class ChromeMetadataPacket;
 class ClockSnapshot;
 class FtraceEventBundle;
 class FtraceStats;
+class GpuCounterEvent;
+class GpuRenderStageEvent;
 class InodeFileMap;
 class InternedData;
 class PackagesList;
@@ -4613,6 +4631,8 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
     kChromeBenchmarkMetadataFieldNumber = 48,
     kPerfettoMetatraceFieldNumber = 49,
     kChromeMetadataFieldNumber = 51,
+    kGpuCounterEventFieldNumber = 52,
+    kGpuRenderStageEventFieldNumber = 53,
     kProcessDescriptorFieldNumber = 43,
     kThreadDescriptorFieldNumber = 44,
     kSynchronizationMarkerFieldNumber = 36,
@@ -4673,6 +4693,10 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
     ::protozero::ConstBytes perfetto_metatrace() const { return at<49>().as_bytes(); }
     bool has_chrome_metadata() const { return at<51>().valid(); }
     ::protozero::ConstBytes chrome_metadata() const { return at<51>().as_bytes(); }
+    bool has_gpu_counter_event() const { return at<52>().valid(); }
+    ::protozero::ConstBytes gpu_counter_event() const { return at<52>().as_bytes(); }
+    bool has_gpu_render_stage_event() const { return at<53>().valid(); }
+    ::protozero::ConstBytes gpu_render_stage_event() const { return at<53>().as_bytes(); }
     bool has_process_descriptor() const { return at<43>().valid(); }
     ::protozero::ConstBytes process_descriptor() const { return at<43>().as_bytes(); }
     bool has_thread_descriptor() const { return at<44>().valid(); }
@@ -4779,6 +4803,14 @@ class PERFETTO_EXPORT TracePacket : public ::protozero::Message {
 
   template <typename T = ChromeMetadataPacket> T* set_chrome_metadata() {
     return BeginNestedMessage<T>(51);
+  }
+
+  template <typename T = GpuCounterEvent> T* set_gpu_counter_event() {
+    return BeginNestedMessage<T>(52);
+  }
+
+  template <typename T = GpuRenderStageEvent> T* set_gpu_render_stage_event() {
+    return BeginNestedMessage<T>(53);
   }
 
   template <typename T = ProcessDescriptor> T* set_process_descriptor() {
@@ -4994,6 +5026,7 @@ class AndroidLogConfig;
 class AndroidPowerConfig;
 class ChromeConfig;
 class FtraceConfig;
+class GpuCounterConfig;
 class HeapprofdConfig;
 class InodeFileConfig;
 class ProcessStatsConfig;
@@ -5015,11 +5048,12 @@ class PERFETTO_EXPORT DataSourceConfig : public ::protozero::Message {
     kHeapprofdConfigFieldNumber = 105,
     kAndroidPowerConfigFieldNumber = 106,
     kAndroidLogConfigFieldNumber = 107,
+    kGpuCounterConfigFieldNumber = 108,
     kChromeConfigFieldNumber = 101,
     kLegacyConfigFieldNumber = 1000,
     kForTestingFieldNumber = 1001,
   };
-  class Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/107, /*HAS_REPEATED_FIELDS=*/false> {
+  class Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/108, /*HAS_REPEATED_FIELDS=*/false> {
    public:
     Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
     explicit Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -5048,6 +5082,8 @@ class PERFETTO_EXPORT DataSourceConfig : public ::protozero::Message {
     ::protozero::ConstBytes android_power_config() const { return at<106>().as_bytes(); }
     bool has_android_log_config() const { return at<107>().valid(); }
     ::protozero::ConstBytes android_log_config() const { return at<107>().as_bytes(); }
+    bool has_gpu_counter_config() const { return at<108>().valid(); }
+    ::protozero::ConstBytes gpu_counter_config() const { return at<108>().as_bytes(); }
     bool has_chrome_config() const { return at<101>().valid(); }
     ::protozero::ConstBytes chrome_config() const { return at<101>().as_bytes(); }
     // field legacy_config omitted because its id is too high
@@ -5099,6 +5135,10 @@ class PERFETTO_EXPORT DataSourceConfig : public ::protozero::Message {
 
   template <typename T = AndroidLogConfig> T* set_android_log_config() {
     return BeginNestedMessage<T>(107);
+  }
+
+  template <typename T = GpuCounterConfig> T* set_gpu_counter_config() {
+    return BeginNestedMessage<T>(108);
   }
 
   template <typename T = ChromeConfig> T* set_chrome_config() {
@@ -5195,6 +5235,52 @@ class PERFETTO_EXPORT FtraceConfig : public ::protozero::Message {
   }
   void set_drain_period_ms(uint32_t value) {
     AppendVarInt(11, value);
+  }
+};
+
+} // Namespace.
+} // Namespace.
+} // Namespace.
+#endif  // Include guard.
+// gen_amalgamated begin header: out/tmp.gen_amalgamated/gen/protos/perfetto/config/gpu/gpu_counter_config.pbzero.h
+// Autogenerated by the ProtoZero compiler plugin. DO NOT EDIT.
+
+#ifndef PERFETTO_PROTOS_PERFETTO_CONFIG_GPU_GPU_COUNTER_CONFIG_PROTO_H_
+#define PERFETTO_PROTOS_PERFETTO_CONFIG_GPU_GPU_COUNTER_CONFIG_PROTO_H_
+
+#include <stddef.h>
+#include <stdint.h>
+
+// gen_amalgamated expanded: #include "perfetto/base/export.h"
+// gen_amalgamated expanded: #include "perfetto/protozero/proto_decoder.h"
+// gen_amalgamated expanded: #include "perfetto/protozero/message.h"
+
+namespace perfetto {
+namespace protos {
+namespace pbzero {
+
+
+class PERFETTO_EXPORT GpuCounterConfig : public ::protozero::Message {
+ public:
+  enum : int32_t {
+    kCounterPeriodNsFieldNumber = 1,
+    kCounterIdsFieldNumber = 2,
+  };
+  class Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/2, /*HAS_REPEATED_FIELDS=*/true> {
+   public:
+    Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
+    explicit Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
+    explicit Decoder(const ::protozero::ConstBytes& raw) : TypedProtoDecoder(raw.data, raw.size) {}
+    bool has_counter_period_ns() const { return at<1>().valid(); }
+    uint64_t counter_period_ns() const { return at<1>().as_uint64(); }
+    bool has_counter_ids() const { return at<2>().valid(); }
+    ::protozero::RepeatedFieldIterator counter_ids() const { return GetRepeated(2); }
+  };
+  void set_counter_period_ns(uint64_t value) {
+    AppendVarInt(1, value);
+  }
+  void add_counter_ids(uint32_t value) {
+    AppendVarInt(2, value);
   }
 };
 
