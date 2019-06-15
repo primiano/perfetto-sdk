@@ -77537,7 +77537,10 @@ class HeapBuffered {
   T* get() { return &msg_; }
   T* operator->() { return &msg_; }
 
-  std::vector<uint8_t> SerializeAsArray() { return shb_.StitchSlices(); }
+  std::vector<uint8_t> SerializeAsArray() {
+    msg_.Finalize();
+    return shb_.StitchSlices();
+  }
 
   std::string SerializeAsString() {
     auto vec = SerializeAsArray();
@@ -84059,6 +84062,13 @@ class PERFETTO_EXPORT DataSourceConfig {
     android_log_config_ = raw;
   }
 
+  const std::string& gpu_counter_config_raw() const {
+    return gpu_counter_config_;
+  }
+  void set_gpu_counter_config_raw(const std::string& raw) {
+    gpu_counter_config_ = raw;
+  }
+
   const ChromeConfig& chrome_config() const { return chrome_config_; }
   ChromeConfig* mutable_chrome_config() { return &chrome_config_; }
 
@@ -84081,6 +84091,7 @@ class PERFETTO_EXPORT DataSourceConfig {
   std::string heapprofd_config_ = {};      // [lazy=true]
   std::string android_power_config_ = {};  // [lazy=true]
   std::string android_log_config_ = {};    // [lazy=true]
+  std::string gpu_counter_config_ = {};    // [lazy=true]
   ChromeConfig chrome_config_ = {};
   std::string legacy_config_ = {};
   TestConfig for_testing_ = {};
@@ -84150,6 +84161,7 @@ bool DataSourceConfig::operator==(const DataSourceConfig& other) const {
          (heapprofd_config_ == other.heapprofd_config_) &&
          (android_power_config_ == other.android_power_config_) &&
          (android_log_config_ == other.android_log_config_) &&
+         (gpu_counter_config_ == other.gpu_counter_config_) &&
          (chrome_config_ == other.chrome_config_) &&
          (legacy_config_ == other.legacy_config_) &&
          (for_testing_ == other.for_testing_);
@@ -84201,6 +84213,8 @@ void DataSourceConfig::FromProto(
   android_power_config_ = proto.android_power_config().SerializeAsString();
 
   android_log_config_ = proto.android_log_config().SerializeAsString();
+
+  gpu_counter_config_ = proto.gpu_counter_config().SerializeAsString();
 
   chrome_config_.FromProto(proto.chrome_config());
 
@@ -84256,6 +84270,8 @@ void DataSourceConfig::ToProto(
   proto->mutable_android_power_config()->ParseFromString(android_power_config_);
 
   proto->mutable_android_log_config()->ParseFromString(android_log_config_);
+
+  proto->mutable_gpu_counter_config()->ParseFromString(gpu_counter_config_);
 
   chrome_config_.ToProto(proto->mutable_chrome_config());
 
@@ -102288,7 +102304,8 @@ std::unique_ptr<ProducerEndpoint> InProcessTracingBackend::ConnectProducer(
 
   return GetOrCreateService(args.task_runner)
       ->ConnectProducer(args.producer, /*uid=*/0, args.producer_name,
-                        /*shm_hint=*/0, /*in_process=*/true);
+                        /*shm_hint=*/0, /*in_process=*/true,
+                        TracingService::ProducerSMBScrapingMode::kEnabled);
 }
 
 std::unique_ptr<ConsumerEndpoint> InProcessTracingBackend::ConnectConsumer(
@@ -102786,6 +102803,7 @@ class SystemTracingBackend : public TracingBackend {
 #include <atomic>
 #include <vector>
 
+// gen_amalgamated expanded: #include "perfetto/base/build_config.h"
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
 // gen_amalgamated expanded: #include "perfetto/base/task_runner.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
@@ -103063,8 +103081,20 @@ void TracingMuxerImpl::Initialize(const TracingInitArgs& args) {
     rb.producer->Initialize(rb.backend->ConnectProducer(conn_args));
   };
 
-  if (args.backends & kSystemBackend)
+  if (args.backends & kSystemBackend) {
+// These buildflags match the |perfetto_build_with_ipc_layer| condition in
+// the //src/tracing:client_api target.
+#if (PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD) ||     \
+     PERFETTO_BUILDFLAG(PERFETTO_CHROMIUM_BUILD) ||    \
+     PERFETTO_BUILDFLAG(PERFETTO_STANDALONE_BUILD)) && \
+    (PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) ||          \
+     PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) ||        \
+     PERFETTO_BUILDFLAG(PERFETTO_OS_MACOSX))
     add_backend(SystemTracingBackend::GetInstance(), kSystemBackend);
+#else
+    PERFETTO_ELOG("System backend not supporteed in the current configuration");
+#endif
+  }
 
   if (args.backends & kInProcessBackend)
     add_backend(InProcessTracingBackend::GetInstance(), kInProcessBackend);
@@ -103595,7 +103625,8 @@ std::unique_ptr<ProducerEndpoint> SystemTracingBackend::ConnectProducer(
   PERFETTO_DCHECK(args.task_runner->RunsTasksOnCurrentThread());
 
   auto endpoint = ProducerIPCClient::Connect(
-      GetProducerSocket(), args.producer, args.producer_name, args.task_runner);
+      GetProducerSocket(), args.producer, args.producer_name, args.task_runner,
+      TracingService::ProducerSMBScrapingMode::kEnabled);
   PERFETTO_CHECK(endpoint);
   return endpoint;
 }

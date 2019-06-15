@@ -49,7 +49,10 @@ int main() {
       PERFETTO_LOG("Tracing lambda called");
       auto packet = ctx.NewTracePacket();
       packet->set_timestamp(42);
-      packet->set_for_testing()->set_str("event 1");
+      auto* gpu_packet = packet->set_gpu_counter_event();
+      auto* cnt = gpu_packet->add_counters();
+      cnt->set_counter_id(1);
+      cnt->set_value(10);
     });
     sleep(1);
   }
