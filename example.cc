@@ -29,7 +29,25 @@ class MyDataSource : public perfetto::DataSource<MyDataSource> {
 
   void OnStart(const StartArgs&) override { PERFETTO_ILOG("OnStart called"); }
 
-  void OnStop(const StopArgs&) override { PERFETTO_ILOG("OnStop called"); }
+  void OnStop(const StopArgs& stop_args) override {
+    PERFETTO_ILOG("OnStop called");
+
+    auto stop_closure = stop_args.HandleStopAsynchronously();
+
+    // It is possible to trace on stop as well, but doing so requires manually
+    // calling Flush() at the end.
+    MyDataSource::Trace([](MyDataSource::TraceContext ctx) {
+      PERFETTO_LOG("Tracing lambda called while stopping");
+      // This block here is to auto-finalize the packet before calling Flush.
+      {
+        auto packet = ctx.NewTracePacket();
+        packet->set_timestamp(999);
+      }
+      ctx.Flush();
+    });
+
+    stop_closure();
+  }
 };
 
 PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS(MyDataSource);
@@ -52,7 +70,6 @@ int main() {
       auto* gpu_packet = packet->set_gpu_counter_event();
       auto* cnt = gpu_packet->add_counters();
       cnt->set_counter_id(1);
-      cnt->set_value(10);
     });
     sleep(1);
   }

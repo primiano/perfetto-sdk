@@ -2583,6 +2583,13 @@ class RepeatedFieldIterator {
     return *this;
   }
 
+  RepeatedFieldIterator operator++(int) {
+    PERFETTO_DCHECK(iter_ != end_);
+    RepeatedFieldIterator it(*this);
+    ++(*this);
+    return it;
+  }
+
  private:
   inline void FindNextMatchingId() {
     PERFETTO_DCHECK(iter_ != last_);
@@ -3115,11 +3122,15 @@ class TracePacket;
 
 // The bare-minimum subset of the TraceWriter interface that is exposed as a
 // fully public API.
+// See comments in /include/perfetto/ext/tracing/core/trace_writer.h.
 class TraceWriterBase {
  public:
   virtual ~TraceWriterBase();
+
   virtual protozero::MessageHandle<protos::pbzero::TracePacket>
   NewTracePacket() = 0;
+
+  virtual void Flush(std::function<void()> callback = {}) = 0;
 };
 
 }  // namespace perfetto
@@ -3171,10 +3182,20 @@ class TracingTLS;
 // There is one of these object per DataSource instance (up to
 // kMaxDataSourceInstances).
 struct DataSourceState {
-  // If false the data source is initialized but not started yet (or stopped).
-  // This is set right before calling OnStart() and cleared right before calling
-  // OnStop()
-  bool started = false;
+  // This boolean flag determines whether the DataSource::Trace() method should
+  // do something or be a no-op. This flag doesn't give the full guarantee
+  // that tracing data will be visible in the trace, it just makes it so that
+  // the client attemps writing trace data and interacting with the service.
+  // For instance, when a tracing session ends the service will reject data
+  // commits that arrive too late even if the producer hasn't received the stop
+  // IPC message.
+  // This flag is set right before calling OnStart() and cleared right before
+  // calling OnStop(), unless using HandleStopAsynchronously() (see comments
+  // in data_source.h).
+  // Keep this flag as the first field. This allows the compiler to directly
+  // dereference the DataSourceState* pointer in the trace fast-path without
+  // doing extra pointr arithmetic.
+  bool trace_lambda_enabled = false;
 
   // The central buffer id that all TraceWriter(s) created by this data source
   // must target.
@@ -3533,7 +3554,7 @@ class PERFETTO_EXPORT TracingMuxer {
   static TracingMuxer* instance_;
   Platform* const platform_ = nullptr;
 
-  // Incremented upon each data source stop. See comment in tracing_tls.h.
+  // Incremented every time a data source is destroyed. See tracing_tls.h.
   std::atomic<uint32_t> generation_{};
 };
 
@@ -3648,20 +3669,48 @@ class PERFETTO_EXPORT DataSourceBase {
  public:
   virtual ~DataSourceBase();
 
+  // TODO(primiano): change the const& args below to be pointers instead. It
+  // makes it more awkward to handle output arguments and require mutable(s).
+  // This requires synchronizing a breaking API change for existing embedders.
+
   // OnSetup() is invoked when tracing is configured. In most cases this happens
   // just before starting the trace. In the case of deferred start (see
   // deferred_start in trace_config.proto) start might happen later.
-  struct SetupArgs {
+  class SetupArgs {
+   public:
     // This is valid only within the scope of the OnSetup() call and must not
     // be retained.
     const DataSourceConfig* config = nullptr;
   };
   virtual void OnSetup(const SetupArgs&);
 
-  struct StartArgs {};
+  class StartArgs {};
   virtual void OnStart(const StartArgs&);
 
-  struct StopArgs {};
+  class StopArgs {
+   public:
+    virtual ~StopArgs();
+
+    // HandleAsynchronously() can optionally be called to defer the tracing
+    // session stop and write tracing data just before stopping.
+    // This function returns a closure that must be invoked after the last
+    // trace events have been emitted. The returned closure can be called from
+    // any thread. The caller also needs to explicitly call TraceContext.Flush()
+    // from the last Trace() lambda invocation because no other implicit flushes
+    // will happen after the stop signal.
+    // When this function is called, the tracing service will defer the stop of
+    // the tracing session until the returned closure is invoked.
+    // However, the caller cannot hang onto this closure for too long. The
+    // tracing service will forcefully stop the tracing session without waiting
+    // for pending producers after TraceConfig.data_source_stop_timeout_ms
+    // (default: 5s, can be overridden by Consumers when starting a trace).
+    // If the closure is called after this timeout an error will be logged and
+    // the trace data emitted will not be present in the trace. No other
+    // functional side effects (e.g. crashes or corruptions) will happen. In
+    // other words, it is fine to accidentally hold onto this closure for too
+    // long but, if that happens, some tracing data will be lost.
+    virtual std::function<void()> HandleStopAsynchronously() const = 0;
+  };
   virtual void OnStop(const StopArgs&);
 };
 
@@ -3683,6 +3732,22 @@ class DataSource : public DataSourceBase {
     TracePacketHandle NewTracePacket() {
       return trace_writer_->NewTracePacket();
     }
+
+    // Forces a commit of the thread-local tracing data written so far to the
+    // service. This is almost never required (tracing data is periodically
+    // committed as trace pages are filled up) and has a non-negligible
+    // performance hit (requires an IPC + refresh of the current thread-local
+    // chunk). The only case when this should be used is when handling OnStop()
+    // asynchronously, to ensure sure that the data is committed before the
+    // Stop timeout expires.
+    // The TracePacketHandle obtained by the last NewTracePacket() call must be
+    // finalized before calling Flush() (either implicitly by going out of scope
+    // or by explicitly calling Finalize()).
+    // |cb| is an optional callback. When non-null it will request the
+    // service to ACK the flush and will be invoked on an internal thread after
+    // the service has  acknowledged it. The callback might be NEVER INVOKED if
+    // the service crashes or the IPC connection is dropped.
+    void Flush(std::function<void()> cb = {}) { trace_writer_->Flush(cb); }
 
     // Returns a RAII handle to access the data source instance, guaranteeing
     // that it won't be deleted on another thread (because of trace stopping)
@@ -3812,7 +3877,7 @@ class DataSource : public DataSourceBase {
         instances =
             static_state_.valid_instances.load(std::memory_order_acquire);
         instance_state = static_state_.TryGetCached(instances, i);
-        if (!instance_state || !instance_state->started)
+        if (!instance_state || !instance_state->trace_lambda_enabled)
           return;
         tls_inst.backend_id = instance_state->backend_id;
         tls_inst.buffer_id = instance_state->buffer_id;
@@ -3866,6 +3931,16 @@ class DataSource : public DataSourceBase {
 
 }  // namespace perfetto
 
+// If a data source is used across translation units, this declaration must be
+// placed into the header file defining the data source.
+#define PERFETTO_DECLARE_DATA_SOURCE_STATIC_MEMBERS(X)         \
+  template <>                                                  \
+  perfetto::internal::DataSourceStaticState                    \
+      perfetto::DataSource<X>::static_state_;                  \
+  template <>                                                  \
+  thread_local perfetto::internal::DataSourceThreadLocalState* \
+      perfetto::DataSource<X>::tls_state_
+
 // The API client must use this in a translation unit. This is because it needs
 // to instantiate the static storage for the datasource to allow the fastpath
 // enabled check.
@@ -3907,6 +3982,7 @@ class DataSource : public DataSourceBase {
 #include <vector>
 
 // gen_amalgamated expanded: #include "perfetto/base/export.h"
+// gen_amalgamated expanded: #include "perfetto/base/logging.h"
 
 namespace perfetto {
 
@@ -3941,6 +4017,10 @@ struct TracingInitArgs {
   // of platform-specific bits like thread creation and TLS slot handling. If
   // not set it will use Platform::GetDefaultPlatform().
   Platform* platform = nullptr;
+
+ protected:
+  friend class Tracing;
+  bool dcheck_is_on_ = PERFETTO_DCHECK_IS_ON();
 };
 
 // The entry-point for using perfetto.
@@ -3950,9 +4030,12 @@ class PERFETTO_EXPORT Tracing {
   // with a user-provided backend. Can only be called once.
   static void Initialize(const TracingInitArgs&);
 
+  // Start a new tracing session using the given tracing backend. Use
+  // |kUnspecifiedBackend| to select an available backend automatically.
   // For the moment this can be used only when initializing tracing in
   // kInProcess mode. For the system mode use the 'bin/perfetto' cmdline client.
-  static std::unique_ptr<TracingSession> NewTrace(BackendType);
+  static std::unique_ptr<TracingSession> NewTrace(
+      BackendType = kUnspecifiedBackend);
 
  private:
   Tracing() = delete;
@@ -3966,11 +4049,24 @@ class PERFETTO_EXPORT TracingSession {
   // TODO(primiano): add an error callback.
   virtual void Setup(const TraceConfig&) = 0;
 
+  // Enable tracing asynchronously.
   virtual void Start() = 0;
 
+  // Enable tracing and block until tracing has started. Note that if data
+  // sources are registered after this call was initiated, the call may return
+  // before the additional data sources have started. Also, if other producers
+  // (e.g., with system-wide tracing) have registered data sources without start
+  // notification support, this call may return before those data sources have
+  // started.
+  virtual void StartBlocking() = 0;
+
+  // Disable tracing asynchronously.
   // Use SetOnStopCallback() to get a notification when the tracing session is
   // fully stopped and all data sources have acked.
   virtual void Stop() = 0;
+
+  // Disable tracing and block until tracing has stopped.
+  virtual void StopBlocking() = 0;
 
   // This callback will be invoked when tracing is disabled.
   // This can happen either when explicitly calling TracingSession.Stop() or
@@ -4825,6 +4921,13 @@ class RepeatedFieldIterator {
     ++iter_;
     FindNextMatchingId();
     return *this;
+  }
+
+  RepeatedFieldIterator operator++(int) {
+    PERFETTO_DCHECK(iter_ != end_);
+    RepeatedFieldIterator it(*this);
+    ++(*this);
+    return it;
   }
 
  private:
@@ -6307,6 +6410,148 @@ namespace protos {
 namespace pbzero {
 
 class GpuCounterDescriptor_GpuCounterSpec;
+enum GpuCounterDescriptor_MeasureUnit : int32_t;
+
+enum GpuCounterDescriptor_MeasureUnit : int32_t {
+  GpuCounterDescriptor_MeasureUnit_ACRE = 0,
+  GpuCounterDescriptor_MeasureUnit_ACRE_FOOT = 1,
+  GpuCounterDescriptor_MeasureUnit_AMPERE = 2,
+  GpuCounterDescriptor_MeasureUnit_ARC_MINUTE = 3,
+  GpuCounterDescriptor_MeasureUnit_ARC_SECOND = 4,
+  GpuCounterDescriptor_MeasureUnit_ASTRONOMICAL_UNIT = 5,
+  GpuCounterDescriptor_MeasureUnit_BIT = 6,
+  GpuCounterDescriptor_MeasureUnit_BUSHEL = 7,
+  GpuCounterDescriptor_MeasureUnit_BYTE = 8,
+  GpuCounterDescriptor_MeasureUnit_CALORIE = 9,
+  GpuCounterDescriptor_MeasureUnit_CARAT = 10,
+  GpuCounterDescriptor_MeasureUnit_CELSIUS = 11,
+  GpuCounterDescriptor_MeasureUnit_CENTILITER = 12,
+  GpuCounterDescriptor_MeasureUnit_CENTIMETER = 13,
+  GpuCounterDescriptor_MeasureUnit_CENTURY = 14,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_CENTIMETER = 15,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_FOOT = 16,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_INCH = 17,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_KILOMETER = 18,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_METER = 19,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_MILE = 20,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_YARD = 21,
+  GpuCounterDescriptor_MeasureUnit_CUP = 22,
+  GpuCounterDescriptor_MeasureUnit_CUP_METRIC = 23,
+  GpuCounterDescriptor_MeasureUnit_DAY = 24,
+  GpuCounterDescriptor_MeasureUnit_DECILITER = 25,
+  GpuCounterDescriptor_MeasureUnit_DECIMETER = 26,
+  GpuCounterDescriptor_MeasureUnit_DEGREE = 27,
+  GpuCounterDescriptor_MeasureUnit_FAHRENHEIT = 28,
+  GpuCounterDescriptor_MeasureUnit_FATHOM = 29,
+  GpuCounterDescriptor_MeasureUnit_FLUID_OUNCE = 30,
+  GpuCounterDescriptor_MeasureUnit_FOODCALORIE = 31,
+  GpuCounterDescriptor_MeasureUnit_FOOT = 32,
+  GpuCounterDescriptor_MeasureUnit_FURLONG = 33,
+  GpuCounterDescriptor_MeasureUnit_GALLON = 34,
+  GpuCounterDescriptor_MeasureUnit_GALLON_IMPERIAL = 35,
+  GpuCounterDescriptor_MeasureUnit_GENERIC_TEMPERATURE = 36,
+  GpuCounterDescriptor_MeasureUnit_GIGABIT = 37,
+  GpuCounterDescriptor_MeasureUnit_GIGABYTE = 38,
+  GpuCounterDescriptor_MeasureUnit_GIGAHERTZ = 39,
+  GpuCounterDescriptor_MeasureUnit_GIGAWATT = 40,
+  GpuCounterDescriptor_MeasureUnit_GRAM = 41,
+  GpuCounterDescriptor_MeasureUnit_G_FORCE = 42,
+  GpuCounterDescriptor_MeasureUnit_HECTARE = 43,
+  GpuCounterDescriptor_MeasureUnit_HECTOLITER = 44,
+  GpuCounterDescriptor_MeasureUnit_HECTOPASCAL = 45,
+  GpuCounterDescriptor_MeasureUnit_HERTZ = 46,
+  GpuCounterDescriptor_MeasureUnit_HORSEPOWER = 47,
+  GpuCounterDescriptor_MeasureUnit_HOUR = 48,
+  GpuCounterDescriptor_MeasureUnit_INCH = 49,
+  GpuCounterDescriptor_MeasureUnit_INCH_HG = 50,
+  GpuCounterDescriptor_MeasureUnit_JOULE = 51,
+  GpuCounterDescriptor_MeasureUnit_KARAT = 52,
+  GpuCounterDescriptor_MeasureUnit_KELVIN = 53,
+  GpuCounterDescriptor_MeasureUnit_KILOBIT = 54,
+  GpuCounterDescriptor_MeasureUnit_KILOBYTE = 55,
+  GpuCounterDescriptor_MeasureUnit_KILOCALORIE = 56,
+  GpuCounterDescriptor_MeasureUnit_KILOGRAM = 57,
+  GpuCounterDescriptor_MeasureUnit_KILOHERTZ = 58,
+  GpuCounterDescriptor_MeasureUnit_KILOJOULE = 59,
+  GpuCounterDescriptor_MeasureUnit_KILOMETER = 60,
+  GpuCounterDescriptor_MeasureUnit_KILOMETER_PER_HOUR = 61,
+  GpuCounterDescriptor_MeasureUnit_KILOWATT = 62,
+  GpuCounterDescriptor_MeasureUnit_KILOWATT_HOUR = 63,
+  GpuCounterDescriptor_MeasureUnit_KNOT = 64,
+  GpuCounterDescriptor_MeasureUnit_LIGHT_YEAR = 65,
+  GpuCounterDescriptor_MeasureUnit_LITER = 66,
+  GpuCounterDescriptor_MeasureUnit_LITER_PER_100KILOMETERS = 67,
+  GpuCounterDescriptor_MeasureUnit_LITER_PER_KILOMETER = 68,
+  GpuCounterDescriptor_MeasureUnit_LUX = 69,
+  GpuCounterDescriptor_MeasureUnit_MEGABIT = 70,
+  GpuCounterDescriptor_MeasureUnit_MEGABYTE = 71,
+  GpuCounterDescriptor_MeasureUnit_MEGAHERTZ = 72,
+  GpuCounterDescriptor_MeasureUnit_MEGALITER = 73,
+  GpuCounterDescriptor_MeasureUnit_MEGAWATT = 74,
+  GpuCounterDescriptor_MeasureUnit_METER = 75,
+  GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND = 76,
+  GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND_SQUARED = 77,
+  GpuCounterDescriptor_MeasureUnit_METRIC_TON = 78,
+  GpuCounterDescriptor_MeasureUnit_MICROGRAM = 79,
+  GpuCounterDescriptor_MeasureUnit_MICROMETER = 80,
+  GpuCounterDescriptor_MeasureUnit_MICROSECOND = 81,
+  GpuCounterDescriptor_MeasureUnit_MILE = 82,
+  GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON = 83,
+  GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON_IMPERIAL = 84,
+  GpuCounterDescriptor_MeasureUnit_MILE_PER_HOUR = 85,
+  GpuCounterDescriptor_MeasureUnit_MILE_SCANDINAVIAN = 86,
+  GpuCounterDescriptor_MeasureUnit_MILLIAMPERE = 87,
+  GpuCounterDescriptor_MeasureUnit_MILLIBAR = 88,
+  GpuCounterDescriptor_MeasureUnit_MILLIGRAM = 89,
+  GpuCounterDescriptor_MeasureUnit_MILLIGRAM_PER_DECILITER = 90,
+  GpuCounterDescriptor_MeasureUnit_MILLILITER = 91,
+  GpuCounterDescriptor_MeasureUnit_MILLIMETER = 92,
+  GpuCounterDescriptor_MeasureUnit_MILLIMETER_OF_MERCURY = 93,
+  GpuCounterDescriptor_MeasureUnit_MILLIMOLE_PER_LITER = 94,
+  GpuCounterDescriptor_MeasureUnit_MILLISECOND = 95,
+  GpuCounterDescriptor_MeasureUnit_MILLIWATT = 96,
+  GpuCounterDescriptor_MeasureUnit_MINUTE = 97,
+  GpuCounterDescriptor_MeasureUnit_MONTH = 98,
+  GpuCounterDescriptor_MeasureUnit_NANOMETER = 99,
+  GpuCounterDescriptor_MeasureUnit_NANOSECOND = 100,
+  GpuCounterDescriptor_MeasureUnit_NAUTICAL_MILE = 101,
+  GpuCounterDescriptor_MeasureUnit_OHM = 102,
+  GpuCounterDescriptor_MeasureUnit_OUNCE = 103,
+  GpuCounterDescriptor_MeasureUnit_OUNCE_TROY = 104,
+  GpuCounterDescriptor_MeasureUnit_PARSEC = 105,
+  GpuCounterDescriptor_MeasureUnit_PART_PER_MILLION = 106,
+  GpuCounterDescriptor_MeasureUnit_PICOMETER = 107,
+  GpuCounterDescriptor_MeasureUnit_PINT = 108,
+  GpuCounterDescriptor_MeasureUnit_PINT_METRIC = 109,
+  GpuCounterDescriptor_MeasureUnit_POINT = 110,
+  GpuCounterDescriptor_MeasureUnit_POUND = 111,
+  GpuCounterDescriptor_MeasureUnit_POUND_PER_SQUARE_INCH = 112,
+  GpuCounterDescriptor_MeasureUnit_QUART = 113,
+  GpuCounterDescriptor_MeasureUnit_RADIAN = 114,
+  GpuCounterDescriptor_MeasureUnit_REVOLUTION_ANGLE = 115,
+  GpuCounterDescriptor_MeasureUnit_SECOND = 116,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_CENTIMETER = 117,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_FOOT = 118,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_INCH = 119,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_KILOMETER = 120,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_METER = 121,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_MILE = 122,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_YARD = 123,
+  GpuCounterDescriptor_MeasureUnit_STONE = 124,
+  GpuCounterDescriptor_MeasureUnit_TABLESPOON = 125,
+  GpuCounterDescriptor_MeasureUnit_TEASPOON = 126,
+  GpuCounterDescriptor_MeasureUnit_TERABIT = 127,
+  GpuCounterDescriptor_MeasureUnit_TERABYTE = 128,
+  GpuCounterDescriptor_MeasureUnit_TON = 129,
+  GpuCounterDescriptor_MeasureUnit_VOLT = 130,
+  GpuCounterDescriptor_MeasureUnit_WATT = 131,
+  GpuCounterDescriptor_MeasureUnit_WEEK = 132,
+  GpuCounterDescriptor_MeasureUnit_YARD = 133,
+  GpuCounterDescriptor_MeasureUnit_YEAR = 134,
+};
+
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor_MeasureUnit_MIN = GpuCounterDescriptor_MeasureUnit_ACRE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor_MeasureUnit_MAX = GpuCounterDescriptor_MeasureUnit_YEAR;
 
 class GpuCounterDescriptor_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/1, /*HAS_REPEATED_FIELDS=*/true> {
  public:
@@ -6324,13 +6569,149 @@ class GpuCounterDescriptor : public ::protozero::Message {
     kSpecsFieldNumber = 1,
   };
   using GpuCounterSpec = ::perfetto::protos::pbzero::GpuCounterDescriptor_GpuCounterSpec;
+  using MeasureUnit = ::perfetto::protos::pbzero::GpuCounterDescriptor_MeasureUnit;
+  static const MeasureUnit ACRE = GpuCounterDescriptor_MeasureUnit_ACRE;
+  static const MeasureUnit ACRE_FOOT = GpuCounterDescriptor_MeasureUnit_ACRE_FOOT;
+  static const MeasureUnit AMPERE = GpuCounterDescriptor_MeasureUnit_AMPERE;
+  static const MeasureUnit ARC_MINUTE = GpuCounterDescriptor_MeasureUnit_ARC_MINUTE;
+  static const MeasureUnit ARC_SECOND = GpuCounterDescriptor_MeasureUnit_ARC_SECOND;
+  static const MeasureUnit ASTRONOMICAL_UNIT = GpuCounterDescriptor_MeasureUnit_ASTRONOMICAL_UNIT;
+  static const MeasureUnit BIT = GpuCounterDescriptor_MeasureUnit_BIT;
+  static const MeasureUnit BUSHEL = GpuCounterDescriptor_MeasureUnit_BUSHEL;
+  static const MeasureUnit BYTE = GpuCounterDescriptor_MeasureUnit_BYTE;
+  static const MeasureUnit CALORIE = GpuCounterDescriptor_MeasureUnit_CALORIE;
+  static const MeasureUnit CARAT = GpuCounterDescriptor_MeasureUnit_CARAT;
+  static const MeasureUnit CELSIUS = GpuCounterDescriptor_MeasureUnit_CELSIUS;
+  static const MeasureUnit CENTILITER = GpuCounterDescriptor_MeasureUnit_CENTILITER;
+  static const MeasureUnit CENTIMETER = GpuCounterDescriptor_MeasureUnit_CENTIMETER;
+  static const MeasureUnit CENTURY = GpuCounterDescriptor_MeasureUnit_CENTURY;
+  static const MeasureUnit CUBIC_CENTIMETER = GpuCounterDescriptor_MeasureUnit_CUBIC_CENTIMETER;
+  static const MeasureUnit CUBIC_FOOT = GpuCounterDescriptor_MeasureUnit_CUBIC_FOOT;
+  static const MeasureUnit CUBIC_INCH = GpuCounterDescriptor_MeasureUnit_CUBIC_INCH;
+  static const MeasureUnit CUBIC_KILOMETER = GpuCounterDescriptor_MeasureUnit_CUBIC_KILOMETER;
+  static const MeasureUnit CUBIC_METER = GpuCounterDescriptor_MeasureUnit_CUBIC_METER;
+  static const MeasureUnit CUBIC_MILE = GpuCounterDescriptor_MeasureUnit_CUBIC_MILE;
+  static const MeasureUnit CUBIC_YARD = GpuCounterDescriptor_MeasureUnit_CUBIC_YARD;
+  static const MeasureUnit CUP = GpuCounterDescriptor_MeasureUnit_CUP;
+  static const MeasureUnit CUP_METRIC = GpuCounterDescriptor_MeasureUnit_CUP_METRIC;
+  static const MeasureUnit DAY = GpuCounterDescriptor_MeasureUnit_DAY;
+  static const MeasureUnit DECILITER = GpuCounterDescriptor_MeasureUnit_DECILITER;
+  static const MeasureUnit DECIMETER = GpuCounterDescriptor_MeasureUnit_DECIMETER;
+  static const MeasureUnit DEGREE = GpuCounterDescriptor_MeasureUnit_DEGREE;
+  static const MeasureUnit FAHRENHEIT = GpuCounterDescriptor_MeasureUnit_FAHRENHEIT;
+  static const MeasureUnit FATHOM = GpuCounterDescriptor_MeasureUnit_FATHOM;
+  static const MeasureUnit FLUID_OUNCE = GpuCounterDescriptor_MeasureUnit_FLUID_OUNCE;
+  static const MeasureUnit FOODCALORIE = GpuCounterDescriptor_MeasureUnit_FOODCALORIE;
+  static const MeasureUnit FOOT = GpuCounterDescriptor_MeasureUnit_FOOT;
+  static const MeasureUnit FURLONG = GpuCounterDescriptor_MeasureUnit_FURLONG;
+  static const MeasureUnit GALLON = GpuCounterDescriptor_MeasureUnit_GALLON;
+  static const MeasureUnit GALLON_IMPERIAL = GpuCounterDescriptor_MeasureUnit_GALLON_IMPERIAL;
+  static const MeasureUnit GENERIC_TEMPERATURE = GpuCounterDescriptor_MeasureUnit_GENERIC_TEMPERATURE;
+  static const MeasureUnit GIGABIT = GpuCounterDescriptor_MeasureUnit_GIGABIT;
+  static const MeasureUnit GIGABYTE = GpuCounterDescriptor_MeasureUnit_GIGABYTE;
+  static const MeasureUnit GIGAHERTZ = GpuCounterDescriptor_MeasureUnit_GIGAHERTZ;
+  static const MeasureUnit GIGAWATT = GpuCounterDescriptor_MeasureUnit_GIGAWATT;
+  static const MeasureUnit GRAM = GpuCounterDescriptor_MeasureUnit_GRAM;
+  static const MeasureUnit G_FORCE = GpuCounterDescriptor_MeasureUnit_G_FORCE;
+  static const MeasureUnit HECTARE = GpuCounterDescriptor_MeasureUnit_HECTARE;
+  static const MeasureUnit HECTOLITER = GpuCounterDescriptor_MeasureUnit_HECTOLITER;
+  static const MeasureUnit HECTOPASCAL = GpuCounterDescriptor_MeasureUnit_HECTOPASCAL;
+  static const MeasureUnit HERTZ = GpuCounterDescriptor_MeasureUnit_HERTZ;
+  static const MeasureUnit HORSEPOWER = GpuCounterDescriptor_MeasureUnit_HORSEPOWER;
+  static const MeasureUnit HOUR = GpuCounterDescriptor_MeasureUnit_HOUR;
+  static const MeasureUnit INCH = GpuCounterDescriptor_MeasureUnit_INCH;
+  static const MeasureUnit INCH_HG = GpuCounterDescriptor_MeasureUnit_INCH_HG;
+  static const MeasureUnit JOULE = GpuCounterDescriptor_MeasureUnit_JOULE;
+  static const MeasureUnit KARAT = GpuCounterDescriptor_MeasureUnit_KARAT;
+  static const MeasureUnit KELVIN = GpuCounterDescriptor_MeasureUnit_KELVIN;
+  static const MeasureUnit KILOBIT = GpuCounterDescriptor_MeasureUnit_KILOBIT;
+  static const MeasureUnit KILOBYTE = GpuCounterDescriptor_MeasureUnit_KILOBYTE;
+  static const MeasureUnit KILOCALORIE = GpuCounterDescriptor_MeasureUnit_KILOCALORIE;
+  static const MeasureUnit KILOGRAM = GpuCounterDescriptor_MeasureUnit_KILOGRAM;
+  static const MeasureUnit KILOHERTZ = GpuCounterDescriptor_MeasureUnit_KILOHERTZ;
+  static const MeasureUnit KILOJOULE = GpuCounterDescriptor_MeasureUnit_KILOJOULE;
+  static const MeasureUnit KILOMETER = GpuCounterDescriptor_MeasureUnit_KILOMETER;
+  static const MeasureUnit KILOMETER_PER_HOUR = GpuCounterDescriptor_MeasureUnit_KILOMETER_PER_HOUR;
+  static const MeasureUnit KILOWATT = GpuCounterDescriptor_MeasureUnit_KILOWATT;
+  static const MeasureUnit KILOWATT_HOUR = GpuCounterDescriptor_MeasureUnit_KILOWATT_HOUR;
+  static const MeasureUnit KNOT = GpuCounterDescriptor_MeasureUnit_KNOT;
+  static const MeasureUnit LIGHT_YEAR = GpuCounterDescriptor_MeasureUnit_LIGHT_YEAR;
+  static const MeasureUnit LITER = GpuCounterDescriptor_MeasureUnit_LITER;
+  static const MeasureUnit LITER_PER_100KILOMETERS = GpuCounterDescriptor_MeasureUnit_LITER_PER_100KILOMETERS;
+  static const MeasureUnit LITER_PER_KILOMETER = GpuCounterDescriptor_MeasureUnit_LITER_PER_KILOMETER;
+  static const MeasureUnit LUX = GpuCounterDescriptor_MeasureUnit_LUX;
+  static const MeasureUnit MEGABIT = GpuCounterDescriptor_MeasureUnit_MEGABIT;
+  static const MeasureUnit MEGABYTE = GpuCounterDescriptor_MeasureUnit_MEGABYTE;
+  static const MeasureUnit MEGAHERTZ = GpuCounterDescriptor_MeasureUnit_MEGAHERTZ;
+  static const MeasureUnit MEGALITER = GpuCounterDescriptor_MeasureUnit_MEGALITER;
+  static const MeasureUnit MEGAWATT = GpuCounterDescriptor_MeasureUnit_MEGAWATT;
+  static const MeasureUnit METER = GpuCounterDescriptor_MeasureUnit_METER;
+  static const MeasureUnit METER_PER_SECOND = GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND;
+  static const MeasureUnit METER_PER_SECOND_SQUARED = GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND_SQUARED;
+  static const MeasureUnit METRIC_TON = GpuCounterDescriptor_MeasureUnit_METRIC_TON;
+  static const MeasureUnit MICROGRAM = GpuCounterDescriptor_MeasureUnit_MICROGRAM;
+  static const MeasureUnit MICROMETER = GpuCounterDescriptor_MeasureUnit_MICROMETER;
+  static const MeasureUnit MICROSECOND = GpuCounterDescriptor_MeasureUnit_MICROSECOND;
+  static const MeasureUnit MILE = GpuCounterDescriptor_MeasureUnit_MILE;
+  static const MeasureUnit MILE_PER_GALLON = GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON;
+  static const MeasureUnit MILE_PER_GALLON_IMPERIAL = GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON_IMPERIAL;
+  static const MeasureUnit MILE_PER_HOUR = GpuCounterDescriptor_MeasureUnit_MILE_PER_HOUR;
+  static const MeasureUnit MILE_SCANDINAVIAN = GpuCounterDescriptor_MeasureUnit_MILE_SCANDINAVIAN;
+  static const MeasureUnit MILLIAMPERE = GpuCounterDescriptor_MeasureUnit_MILLIAMPERE;
+  static const MeasureUnit MILLIBAR = GpuCounterDescriptor_MeasureUnit_MILLIBAR;
+  static const MeasureUnit MILLIGRAM = GpuCounterDescriptor_MeasureUnit_MILLIGRAM;
+  static const MeasureUnit MILLIGRAM_PER_DECILITER = GpuCounterDescriptor_MeasureUnit_MILLIGRAM_PER_DECILITER;
+  static const MeasureUnit MILLILITER = GpuCounterDescriptor_MeasureUnit_MILLILITER;
+  static const MeasureUnit MILLIMETER = GpuCounterDescriptor_MeasureUnit_MILLIMETER;
+  static const MeasureUnit MILLIMETER_OF_MERCURY = GpuCounterDescriptor_MeasureUnit_MILLIMETER_OF_MERCURY;
+  static const MeasureUnit MILLIMOLE_PER_LITER = GpuCounterDescriptor_MeasureUnit_MILLIMOLE_PER_LITER;
+  static const MeasureUnit MILLISECOND = GpuCounterDescriptor_MeasureUnit_MILLISECOND;
+  static const MeasureUnit MILLIWATT = GpuCounterDescriptor_MeasureUnit_MILLIWATT;
+  static const MeasureUnit MINUTE = GpuCounterDescriptor_MeasureUnit_MINUTE;
+  static const MeasureUnit MONTH = GpuCounterDescriptor_MeasureUnit_MONTH;
+  static const MeasureUnit NANOMETER = GpuCounterDescriptor_MeasureUnit_NANOMETER;
+  static const MeasureUnit NANOSECOND = GpuCounterDescriptor_MeasureUnit_NANOSECOND;
+  static const MeasureUnit NAUTICAL_MILE = GpuCounterDescriptor_MeasureUnit_NAUTICAL_MILE;
+  static const MeasureUnit OHM = GpuCounterDescriptor_MeasureUnit_OHM;
+  static const MeasureUnit OUNCE = GpuCounterDescriptor_MeasureUnit_OUNCE;
+  static const MeasureUnit OUNCE_TROY = GpuCounterDescriptor_MeasureUnit_OUNCE_TROY;
+  static const MeasureUnit PARSEC = GpuCounterDescriptor_MeasureUnit_PARSEC;
+  static const MeasureUnit PART_PER_MILLION = GpuCounterDescriptor_MeasureUnit_PART_PER_MILLION;
+  static const MeasureUnit PICOMETER = GpuCounterDescriptor_MeasureUnit_PICOMETER;
+  static const MeasureUnit PINT = GpuCounterDescriptor_MeasureUnit_PINT;
+  static const MeasureUnit PINT_METRIC = GpuCounterDescriptor_MeasureUnit_PINT_METRIC;
+  static const MeasureUnit POINT = GpuCounterDescriptor_MeasureUnit_POINT;
+  static const MeasureUnit POUND = GpuCounterDescriptor_MeasureUnit_POUND;
+  static const MeasureUnit POUND_PER_SQUARE_INCH = GpuCounterDescriptor_MeasureUnit_POUND_PER_SQUARE_INCH;
+  static const MeasureUnit QUART = GpuCounterDescriptor_MeasureUnit_QUART;
+  static const MeasureUnit RADIAN = GpuCounterDescriptor_MeasureUnit_RADIAN;
+  static const MeasureUnit REVOLUTION_ANGLE = GpuCounterDescriptor_MeasureUnit_REVOLUTION_ANGLE;
+  static const MeasureUnit SECOND = GpuCounterDescriptor_MeasureUnit_SECOND;
+  static const MeasureUnit SQUARE_CENTIMETER = GpuCounterDescriptor_MeasureUnit_SQUARE_CENTIMETER;
+  static const MeasureUnit SQUARE_FOOT = GpuCounterDescriptor_MeasureUnit_SQUARE_FOOT;
+  static const MeasureUnit SQUARE_INCH = GpuCounterDescriptor_MeasureUnit_SQUARE_INCH;
+  static const MeasureUnit SQUARE_KILOMETER = GpuCounterDescriptor_MeasureUnit_SQUARE_KILOMETER;
+  static const MeasureUnit SQUARE_METER = GpuCounterDescriptor_MeasureUnit_SQUARE_METER;
+  static const MeasureUnit SQUARE_MILE = GpuCounterDescriptor_MeasureUnit_SQUARE_MILE;
+  static const MeasureUnit SQUARE_YARD = GpuCounterDescriptor_MeasureUnit_SQUARE_YARD;
+  static const MeasureUnit STONE = GpuCounterDescriptor_MeasureUnit_STONE;
+  static const MeasureUnit TABLESPOON = GpuCounterDescriptor_MeasureUnit_TABLESPOON;
+  static const MeasureUnit TEASPOON = GpuCounterDescriptor_MeasureUnit_TEASPOON;
+  static const MeasureUnit TERABIT = GpuCounterDescriptor_MeasureUnit_TERABIT;
+  static const MeasureUnit TERABYTE = GpuCounterDescriptor_MeasureUnit_TERABYTE;
+  static const MeasureUnit TON = GpuCounterDescriptor_MeasureUnit_TON;
+  static const MeasureUnit VOLT = GpuCounterDescriptor_MeasureUnit_VOLT;
+  static const MeasureUnit WATT = GpuCounterDescriptor_MeasureUnit_WATT;
+  static const MeasureUnit WEEK = GpuCounterDescriptor_MeasureUnit_WEEK;
+  static const MeasureUnit YARD = GpuCounterDescriptor_MeasureUnit_YARD;
+  static const MeasureUnit YEAR = GpuCounterDescriptor_MeasureUnit_YEAR;
   template <typename T = GpuCounterDescriptor_GpuCounterSpec> T* add_specs() {
     return BeginNestedMessage<T>(1);
   }
 
 };
 
-class GpuCounterDescriptor_GpuCounterSpec_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/3, /*HAS_REPEATED_FIELDS=*/false> {
+class GpuCounterDescriptor_GpuCounterSpec_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/6, /*HAS_REPEATED_FIELDS=*/false> {
  public:
   GpuCounterDescriptor_GpuCounterSpec_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit GpuCounterDescriptor_GpuCounterSpec_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -6341,6 +6722,12 @@ class GpuCounterDescriptor_GpuCounterSpec_Decoder : public ::protozero::TypedPro
   ::protozero::ConstChars name() const { return at<2>().as_string(); }
   bool has_description() const { return at<3>().valid(); }
   ::protozero::ConstChars description() const { return at<3>().as_string(); }
+  bool has_unit() const { return at<4>().valid(); }
+  int32_t unit() const { return at<4>().as_int32(); }
+  bool has_int_peak_value() const { return at<5>().valid(); }
+  int64_t int_peak_value() const { return at<5>().as_int64(); }
+  bool has_double_peak_value() const { return at<6>().valid(); }
+  double double_peak_value() const { return at<6>().as_double(); }
 };
 
 class GpuCounterDescriptor_GpuCounterSpec : public ::protozero::Message {
@@ -6350,6 +6737,9 @@ class GpuCounterDescriptor_GpuCounterSpec : public ::protozero::Message {
     kCounterIdFieldNumber = 1,
     kNameFieldNumber = 2,
     kDescriptionFieldNumber = 3,
+    kUnitFieldNumber = 4,
+    kIntPeakValueFieldNumber = 5,
+    kDoublePeakValueFieldNumber = 6,
   };
   void set_counter_id(uint32_t value) {
     AppendVarInt(1, value);
@@ -6369,6 +6759,15 @@ class GpuCounterDescriptor_GpuCounterSpec : public ::protozero::Message {
   // Expects |value| to be at least |size| long.
   void set_description(const char* value, size_t size) {
     AppendBytes(3, value, size);
+  }
+  void set_unit(::perfetto::protos::pbzero::GpuCounterDescriptor_MeasureUnit value) {
+    AppendVarInt(4, value);
+  }
+  void set_int_peak_value(int64_t value) {
+    AppendVarInt(5, value);
+  }
+  void set_double_peak_value(double value) {
+    AppendFixed(6, value);
   }
 };
 
@@ -7727,7 +8126,7 @@ namespace pbzero {
 
 class HeapprofdConfig_ContinuousDumpConfig;
 
-class HeapprofdConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/12, /*HAS_REPEATED_FIELDS=*/true> {
+class HeapprofdConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/13, /*HAS_REPEATED_FIELDS=*/true> {
  public:
   HeapprofdConfig_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit HeapprofdConfig_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -7754,6 +8153,8 @@ class HeapprofdConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIEL
   bool no_running() const { return at<11>().as_bool(); }
   bool has_idle_allocations() const { return at<12>().valid(); }
   bool idle_allocations() const { return at<12>().as_bool(); }
+  bool has_dump_at_max() const { return at<13>().valid(); }
+  bool dump_at_max() const { return at<13>().as_bool(); }
 };
 
 class HeapprofdConfig : public ::protozero::Message {
@@ -7771,6 +8172,7 @@ class HeapprofdConfig : public ::protozero::Message {
     kNoStartupFieldNumber = 10,
     kNoRunningFieldNumber = 11,
     kIdleAllocationsFieldNumber = 12,
+    kDumpAtMaxFieldNumber = 13,
   };
   using ContinuousDumpConfig = ::perfetto::protos::pbzero::HeapprofdConfig_ContinuousDumpConfig;
   void set_sampling_interval_bytes(uint64_t value) {
@@ -7816,6 +8218,9 @@ class HeapprofdConfig : public ::protozero::Message {
   }
   void set_idle_allocations(bool value) {
     AppendTinyVarInt(12, value);
+  }
+  void set_dump_at_max(bool value) {
+    AppendTinyVarInt(13, value);
   }
 };
 
@@ -9487,27 +9892,25 @@ class GpuRenderStageEvent_Specifications;
 class GpuRenderStageEvent_Specifications_ContextSpec;
 class GpuRenderStageEvent_Specifications_Description;
 
-class GpuRenderStageEvent_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/8, /*HAS_REPEATED_FIELDS=*/true> {
+class GpuRenderStageEvent_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/7, /*HAS_REPEATED_FIELDS=*/true> {
  public:
   GpuRenderStageEvent_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit GpuRenderStageEvent_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
   explicit GpuRenderStageEvent_Decoder(const ::protozero::ConstBytes& raw) : TypedProtoDecoder(raw.data, raw.size) {}
   bool has_event_id() const { return at<1>().valid(); }
   uint64_t event_id() const { return at<1>().as_uint64(); }
-  bool has_start_time() const { return at<2>().valid(); }
-  uint64_t start_time() const { return at<2>().as_uint64(); }
-  bool has_duration() const { return at<3>().valid(); }
-  uint64_t duration() const { return at<3>().as_uint64(); }
-  bool has_hw_queue_id() const { return at<4>().valid(); }
-  int32_t hw_queue_id() const { return at<4>().as_int32(); }
-  bool has_stage_id() const { return at<5>().valid(); }
-  int32_t stage_id() const { return at<5>().as_int32(); }
-  bool has_context() const { return at<6>().valid(); }
-  uint64_t context() const { return at<6>().as_uint64(); }
-  bool has_extra_data() const { return at<7>().valid(); }
-  ::protozero::RepeatedFieldIterator extra_data() const { return GetRepeated(7); }
-  bool has_specifications() const { return at<8>().valid(); }
-  ::protozero::ConstBytes specifications() const { return at<8>().as_bytes(); }
+  bool has_duration() const { return at<2>().valid(); }
+  uint64_t duration() const { return at<2>().as_uint64(); }
+  bool has_hw_queue_id() const { return at<3>().valid(); }
+  int32_t hw_queue_id() const { return at<3>().as_int32(); }
+  bool has_stage_id() const { return at<4>().valid(); }
+  int32_t stage_id() const { return at<4>().as_int32(); }
+  bool has_context() const { return at<5>().valid(); }
+  uint64_t context() const { return at<5>().as_uint64(); }
+  bool has_extra_data() const { return at<6>().valid(); }
+  ::protozero::RepeatedFieldIterator extra_data() const { return GetRepeated(6); }
+  bool has_specifications() const { return at<7>().valid(); }
+  ::protozero::ConstBytes specifications() const { return at<7>().as_bytes(); }
 };
 
 class GpuRenderStageEvent : public ::protozero::Message {
@@ -9515,40 +9918,36 @@ class GpuRenderStageEvent : public ::protozero::Message {
   using Decoder = GpuRenderStageEvent_Decoder;
   enum : int32_t {
     kEventIdFieldNumber = 1,
-    kStartTimeFieldNumber = 2,
-    kDurationFieldNumber = 3,
-    kHwQueueIdFieldNumber = 4,
-    kStageIdFieldNumber = 5,
-    kContextFieldNumber = 6,
-    kExtraDataFieldNumber = 7,
-    kSpecificationsFieldNumber = 8,
+    kDurationFieldNumber = 2,
+    kHwQueueIdFieldNumber = 3,
+    kStageIdFieldNumber = 4,
+    kContextFieldNumber = 5,
+    kExtraDataFieldNumber = 6,
+    kSpecificationsFieldNumber = 7,
   };
   using ExtraData = ::perfetto::protos::pbzero::GpuRenderStageEvent_ExtraData;
   using Specifications = ::perfetto::protos::pbzero::GpuRenderStageEvent_Specifications;
   void set_event_id(uint64_t value) {
     AppendVarInt(1, value);
   }
-  void set_start_time(uint64_t value) {
+  void set_duration(uint64_t value) {
     AppendVarInt(2, value);
   }
-  void set_duration(uint64_t value) {
+  void set_hw_queue_id(int32_t value) {
     AppendVarInt(3, value);
   }
-  void set_hw_queue_id(int32_t value) {
+  void set_stage_id(int32_t value) {
     AppendVarInt(4, value);
   }
-  void set_stage_id(int32_t value) {
+  void set_context(uint64_t value) {
     AppendVarInt(5, value);
   }
-  void set_context(uint64_t value) {
-    AppendVarInt(6, value);
-  }
   template <typename T = GpuRenderStageEvent_ExtraData> T* add_extra_data() {
-    return BeginNestedMessage<T>(7);
+    return BeginNestedMessage<T>(6);
   }
 
   template <typename T = GpuRenderStageEvent_Specifications> T* set_specifications() {
-    return BeginNestedMessage<T>(8);
+    return BeginNestedMessage<T>(7);
   }
 
 };
@@ -9590,45 +9989,39 @@ class GpuRenderStageEvent_Specifications : public ::protozero::Message {
 
 };
 
-class GpuRenderStageEvent_Specifications_Description_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/3, /*HAS_REPEATED_FIELDS=*/false> {
+class GpuRenderStageEvent_Specifications_Description_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/2, /*HAS_REPEATED_FIELDS=*/false> {
  public:
   GpuRenderStageEvent_Specifications_Description_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit GpuRenderStageEvent_Specifications_Description_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
   explicit GpuRenderStageEvent_Specifications_Description_Decoder(const ::protozero::ConstBytes& raw) : TypedProtoDecoder(raw.data, raw.size) {}
-  bool has_id() const { return at<1>().valid(); }
-  int32_t id() const { return at<1>().as_int32(); }
-  bool has_name() const { return at<2>().valid(); }
-  ::protozero::ConstChars name() const { return at<2>().as_string(); }
-  bool has_description() const { return at<3>().valid(); }
-  ::protozero::ConstChars description() const { return at<3>().as_string(); }
+  bool has_name() const { return at<1>().valid(); }
+  ::protozero::ConstChars name() const { return at<1>().as_string(); }
+  bool has_description() const { return at<2>().valid(); }
+  ::protozero::ConstChars description() const { return at<2>().as_string(); }
 };
 
 class GpuRenderStageEvent_Specifications_Description : public ::protozero::Message {
  public:
   using Decoder = GpuRenderStageEvent_Specifications_Description_Decoder;
   enum : int32_t {
-    kIdFieldNumber = 1,
-    kNameFieldNumber = 2,
-    kDescriptionFieldNumber = 3,
+    kNameFieldNumber = 1,
+    kDescriptionFieldNumber = 2,
   };
-  void set_id(int32_t value) {
-    AppendVarInt(1, value);
-  }
   void set_name(const char* value) {
-    AppendString(2, value);
+    AppendString(1, value);
   }
   // Doesn't check for null terminator.
   // Expects |value| to be at least |size| long.
   void set_name(const char* value, size_t size) {
-    AppendBytes(2, value, size);
+    AppendBytes(1, value, size);
   }
   void set_description(const char* value) {
-    AppendString(3, value);
+    AppendString(2, value);
   }
   // Doesn't check for null terminator.
   // Expects |value| to be at least |size| long.
   void set_description(const char* value, size_t size) {
-    AppendBytes(3, value, size);
+    AppendBytes(2, value, size);
   }
 };
 

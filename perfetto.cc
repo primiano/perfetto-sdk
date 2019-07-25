@@ -1761,6 +1761,13 @@ class RepeatedFieldIterator {
     return *this;
   }
 
+  RepeatedFieldIterator operator++(int) {
+    PERFETTO_DCHECK(iter_ != end_);
+    RepeatedFieldIterator it(*this);
+    ++(*this);
+    return it;
+  }
+
  private:
   inline void FindNextMatchingId() {
     PERFETTO_DCHECK(iter_ != last_);
@@ -2131,7 +2138,7 @@ ParseOneField(const uint8_t* const buffer, const uint8_t* const end) {
   }
 
   if (PERFETTO_UNLIKELY(field_id > std::numeric_limits<uint16_t>::max())) {
-    PERFETTO_DFATAL("Cannot parse proto field ids > 0xFFFF");
+    // PERFETTO_DFATAL("Cannot parse proto field ids > 0xFFFF");
     return res;
   }
 
@@ -2659,6 +2666,10 @@ uint8_t* ScatteredStreamWriter::ReserveBytes(size_t size) {
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/process_descriptor.pbzero.cc
 // Intentionally empty
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/source_location.pbzero.cc
+// Intentionally empty
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/log_message.pbzero.cc
+// Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/task_execution.pbzero.cc
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/thread_descriptor.pbzero.cc
@@ -3060,6 +3071,7 @@ enum Tags : uint32_t {
   TAG_ANY = uint32_t(-1),
   TAG_FTRACE = 1 << 0,
   TAG_PROC_POLLERS = 1 << 1,
+  TAG_TRACE_WRITER = 1 << 2,
 };
 
 // Compile time list of parsing and processing stats.
@@ -3071,23 +3083,27 @@ enum Tags : uint32_t {
 // DO NOT remove or reshuffle items in this list, only append. The ID of these
 // events are an ABI, the trace processor relies on these to open old traces.
 #define PERFETTO_METATRACE_EVENTS(F) \
-  F(EVENT_ZERO_UNUSED),\
-  F(FTRACE_CPU_READER_READ), \
-  F(FTRACE_DRAIN_CPUS), \
-  F(FTRACE_UNBLOCK_READERS), \
-  F(FTRACE_CPU_READ_NONBLOCK), \
-  F(FTRACE_CPU_READ_BLOCK), \
-  F(FTRACE_CPU_SPLICE_NONBLOCK), \
-  F(FTRACE_CPU_SPLICE_BLOCK), \
-  F(FTRACE_CPU_WAIT_CMD), \
-  F(FTRACE_CPU_RUN_CYCLE), \
+  F(EVENT_ZERO_UNUSED), \
+  F(FTRACE_CPU_READER_READ), /*unused*/ \
+  F(FTRACE_DRAIN_CPUS), /*unused*/ \
+  F(FTRACE_UNBLOCK_READERS), /*unused*/ \
+  F(FTRACE_CPU_READ_NONBLOCK), /*unused*/ \
+  F(FTRACE_CPU_READ_BLOCK), /*unused*/ \
+  F(FTRACE_CPU_SPLICE_NONBLOCK), /*unused*/ \
+  F(FTRACE_CPU_SPLICE_BLOCK), /*unused*/ \
+  F(FTRACE_CPU_WAIT_CMD), /*unused*/ \
+  F(FTRACE_CPU_RUN_CYCLE), /*unused*/ \
   F(FTRACE_CPU_FLUSH), \
-  F(FTRACE_CPU_DRAIN), \
+  F(FTRACE_CPU_DRAIN), /*unused*/ \
   F(READ_SYS_STATS), \
   F(PS_WRITE_ALL_PROCESSES), \
   F(PS_ON_PIDS), \
   F(PS_ON_RENAME_PIDS), \
-  F(PS_WRITE_ALL_PROCESS_STATS)
+  F(PS_WRITE_ALL_PROCESS_STATS), \
+  F(TRACE_WRITER_COMMIT_STARTUP_WRITER_BATCH), \
+  F(FTRACE_READ_TICK), \
+  F(FTRACE_CPU_READ_CYCLE), \
+  F(FTRACE_CPU_READ_BATCH)
 
 // Append only, see above.
 #define PERFETTO_METATRACE_COUNTERS(F) \
@@ -4164,18 +4180,20 @@ PagedMemory PagedMemory::Allocate(size_t size, int flags) {
 
 PagedMemory::PagedMemory() {}
 
-PagedMemory::PagedMemory(char* p, size_t size)
-    : p_(p),
-      size_(size){ANNOTATE_NEW_BUFFER(p_, size_, committed_size_)}
+// clang-format off
+PagedMemory::PagedMemory(char* p, size_t size) : p_(p), size_(size) {
+  ANNOTATE_NEW_BUFFER(p_, size_, committed_size_)
+}
 
-      PagedMemory::PagedMemory(PagedMemory && other) noexcept {
+PagedMemory::PagedMemory(PagedMemory&& other) noexcept {
   *this = other;
   other.p_ = nullptr;
 }
+// clang-format on
 
 PagedMemory& PagedMemory::operator=(PagedMemory&& other) {
-  *this = other;
-  other.p_ = nullptr;
+  this->~PagedMemory();
+  new (this) PagedMemory(std::move(other));
   return *this;
 }
 
@@ -5003,8 +5021,97 @@ TaskRunner::~TaskRunner() = default;
 
 }  // namespace base
 }  // namespace perfetto
-// gen_amalgamated begin source: src/base/event.cc
-// gen_amalgamated begin header: include/perfetto/ext/base/event.h
+// gen_amalgamated begin source: src/base/waitable_event.cc
+// gen_amalgamated begin header: include/perfetto/ext/base/waitable_event.h
+/*
+ * Copyright (C) 2019 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef INCLUDE_PERFETTO_EXT_BASE_WAITABLE_EVENT_H_
+#define INCLUDE_PERFETTO_EXT_BASE_WAITABLE_EVENT_H_
+
+#include <condition_variable>
+#include <mutex>
+
+namespace perfetto {
+namespace base {
+
+// A waitable event for cross-thread synchronization.
+// All methods on this class can be called from any thread.
+class WaitableEvent {
+ public:
+  WaitableEvent();
+  ~WaitableEvent();
+  WaitableEvent(const WaitableEvent&) = delete;
+  WaitableEvent operator=(const WaitableEvent&) = delete;
+
+  // Synchronously block until the event is notified.
+  void Wait();
+
+  // Signal the event, waking up blocked waiters.
+  void Notify();
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable event_;
+  bool notified_ = false;
+};
+
+}  // namespace base
+}  // namespace perfetto
+
+#endif  // INCLUDE_PERFETTO_EXT_BASE_WAITABLE_EVENT_H_
+/*
+ * Copyright (C) 2019 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// gen_amalgamated expanded: #include "perfetto/ext/base/waitable_event.h"
+
+namespace perfetto {
+namespace base {
+
+WaitableEvent::WaitableEvent() = default;
+WaitableEvent::~WaitableEvent() = default;
+
+void WaitableEvent::Wait() {
+  std::unique_lock<std::mutex> lock(mutex_);
+  return event_.wait(lock, [this] { return notified_; });
+}
+
+void WaitableEvent::Notify() {
+  std::unique_lock<std::mutex> lock(mutex_);
+  notified_ = true;
+  event_.notify_all();
+}
+
+}  // namespace base
+}  // namespace perfetto
+// gen_amalgamated begin source: src/base/event_fd.cc
+// gen_amalgamated begin header: include/perfetto/ext/base/event_fd.h
 /*
  * Copyright (C) 2018 The Android Open Source Project
  *
@@ -5021,8 +5128,8 @@ TaskRunner::~TaskRunner() = default;
  * limitations under the License.
  */
 
-#ifndef INCLUDE_PERFETTO_EXT_BASE_EVENT_H_
-#define INCLUDE_PERFETTO_EXT_BASE_EVENT_H_
+#ifndef INCLUDE_PERFETTO_EXT_BASE_EVENT_FD_H_
+#define INCLUDE_PERFETTO_EXT_BASE_EVENT_FD_H_
 
 // gen_amalgamated expanded: #include "perfetto/base/build_config.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/scoped_file.h"
@@ -5040,12 +5147,12 @@ namespace base {
 // A waitable event that can be used with poll/select.
 // This is really a wrapper around eventfd_create with a pipe-based fallback
 // for other platforms where eventfd is not supported.
-class Event {
+class EventFd {
  public:
-  Event();
-  ~Event();
-  Event(Event&&) noexcept = default;
-  Event& operator=(Event&&) = default;
+  EventFd();
+  ~EventFd();
+  EventFd(EventFd&&) noexcept = default;
+  EventFd& operator=(EventFd&&) = default;
 
   // The non-blocking file descriptor that can be polled to wait for the event.
   int fd() const { return fd_.get(); }
@@ -5071,7 +5178,7 @@ class Event {
 }  // namespace base
 }  // namespace perfetto
 
-#endif  // INCLUDE_PERFETTO_EXT_BASE_EVENT_H_
+#endif  // INCLUDE_PERFETTO_EXT_BASE_EVENT_FD_H_
 // gen_amalgamated begin header: include/perfetto/ext/base/pipe.h
 /*
  * Copyright (C) 2018 The Android Open Source Project
@@ -5140,7 +5247,7 @@ class Pipe {
 #include <unistd.h>
 
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
-// gen_amalgamated expanded: #include "perfetto/ext/base/event.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/event_fd.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/pipe.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/utils.h"
 
@@ -5151,7 +5258,7 @@ class Pipe {
 namespace perfetto {
 namespace base {
 
-Event::Event() {
+EventFd::EventFd() {
 #if PERFETTO_USE_EVENTFD()
   fd_.reset(eventfd(/* start value */ 0, EFD_CLOEXEC | EFD_NONBLOCK));
   PERFETTO_CHECK(fd_);
@@ -5164,9 +5271,9 @@ Event::Event() {
 #endif  // !PERFETTO_USE_EVENTFD()
 }
 
-Event::~Event() = default;
+EventFd::~EventFd() = default;
 
-void Event::Notify() {
+void EventFd::Notify() {
   const uint64_t value = 1;
 
 #if PERFETTO_USE_EVENTFD()
@@ -5180,7 +5287,7 @@ void Event::Notify() {
   }
 }
 
-void Event::Clear() {
+void EventFd::Clear() {
 #if PERFETTO_USE_EVENTFD()
   uint64_t value;
   ssize_t ret = read(fd_.get(), &value, sizeof(value));
@@ -5449,7 +5556,7 @@ TempDir::~TempDir() {
 
 // gen_amalgamated expanded: #include "perfetto/base/build_config.h"
 // gen_amalgamated expanded: #include "perfetto/base/task_runner.h"
-// gen_amalgamated expanded: #include "perfetto/ext/base/event.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/event_fd.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/scoped_file.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_utils.h"
@@ -5521,7 +5628,7 @@ class UnixTaskRunner : public TaskRunner {
 
   // On Linux, an eventfd(2) used to waking up the task runner when a new task
   // is posted. Otherwise the read end of a pipe used for the same purpose.
-  Event event_;
+  EventFd event_;
 
   std::vector<struct pollfd> poll_fds_;
 
@@ -6057,11 +6164,15 @@ class TracePacket;
 
 // The bare-minimum subset of the TraceWriter interface that is exposed as a
 // fully public API.
+// See comments in /include/perfetto/ext/tracing/core/trace_writer.h.
 class TraceWriterBase {
  public:
   virtual ~TraceWriterBase();
+
   virtual protozero::MessageHandle<protos::pbzero::TracePacket>
   NewTracePacket() = 0;
+
+  virtual void Flush(std::function<void()> callback = {}) = 0;
 };
 
 }  // namespace perfetto
@@ -8948,6 +9059,7 @@ void CommitDataRequest::clear_flush_request_id() {
 #include <google/protobuf/message_lite.h>
 #include <google/protobuf/repeated_field.h>
 #include <google/protobuf/extension_set.h>
+#include <google/protobuf/generated_enum_util.h>
 // @@protoc_insertion_point(includes)
 
 namespace perfetto {
@@ -8960,6 +9072,148 @@ void protobuf_ShutdownFile_perfetto_2fcommon_2fgpu_5fcounter_5fdescriptor_2eprot
 
 class GpuCounterDescriptor;
 class GpuCounterDescriptor_GpuCounterSpec;
+
+enum GpuCounterDescriptor_MeasureUnit {
+  GpuCounterDescriptor_MeasureUnit_ACRE = 0,
+  GpuCounterDescriptor_MeasureUnit_ACRE_FOOT = 1,
+  GpuCounterDescriptor_MeasureUnit_AMPERE = 2,
+  GpuCounterDescriptor_MeasureUnit_ARC_MINUTE = 3,
+  GpuCounterDescriptor_MeasureUnit_ARC_SECOND = 4,
+  GpuCounterDescriptor_MeasureUnit_ASTRONOMICAL_UNIT = 5,
+  GpuCounterDescriptor_MeasureUnit_BIT = 6,
+  GpuCounterDescriptor_MeasureUnit_BUSHEL = 7,
+  GpuCounterDescriptor_MeasureUnit_BYTE = 8,
+  GpuCounterDescriptor_MeasureUnit_CALORIE = 9,
+  GpuCounterDescriptor_MeasureUnit_CARAT = 10,
+  GpuCounterDescriptor_MeasureUnit_CELSIUS = 11,
+  GpuCounterDescriptor_MeasureUnit_CENTILITER = 12,
+  GpuCounterDescriptor_MeasureUnit_CENTIMETER = 13,
+  GpuCounterDescriptor_MeasureUnit_CENTURY = 14,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_CENTIMETER = 15,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_FOOT = 16,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_INCH = 17,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_KILOMETER = 18,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_METER = 19,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_MILE = 20,
+  GpuCounterDescriptor_MeasureUnit_CUBIC_YARD = 21,
+  GpuCounterDescriptor_MeasureUnit_CUP = 22,
+  GpuCounterDescriptor_MeasureUnit_CUP_METRIC = 23,
+  GpuCounterDescriptor_MeasureUnit_DAY = 24,
+  GpuCounterDescriptor_MeasureUnit_DECILITER = 25,
+  GpuCounterDescriptor_MeasureUnit_DECIMETER = 26,
+  GpuCounterDescriptor_MeasureUnit_DEGREE = 27,
+  GpuCounterDescriptor_MeasureUnit_FAHRENHEIT = 28,
+  GpuCounterDescriptor_MeasureUnit_FATHOM = 29,
+  GpuCounterDescriptor_MeasureUnit_FLUID_OUNCE = 30,
+  GpuCounterDescriptor_MeasureUnit_FOODCALORIE = 31,
+  GpuCounterDescriptor_MeasureUnit_FOOT = 32,
+  GpuCounterDescriptor_MeasureUnit_FURLONG = 33,
+  GpuCounterDescriptor_MeasureUnit_GALLON = 34,
+  GpuCounterDescriptor_MeasureUnit_GALLON_IMPERIAL = 35,
+  GpuCounterDescriptor_MeasureUnit_GENERIC_TEMPERATURE = 36,
+  GpuCounterDescriptor_MeasureUnit_GIGABIT = 37,
+  GpuCounterDescriptor_MeasureUnit_GIGABYTE = 38,
+  GpuCounterDescriptor_MeasureUnit_GIGAHERTZ = 39,
+  GpuCounterDescriptor_MeasureUnit_GIGAWATT = 40,
+  GpuCounterDescriptor_MeasureUnit_GRAM = 41,
+  GpuCounterDescriptor_MeasureUnit_G_FORCE = 42,
+  GpuCounterDescriptor_MeasureUnit_HECTARE = 43,
+  GpuCounterDescriptor_MeasureUnit_HECTOLITER = 44,
+  GpuCounterDescriptor_MeasureUnit_HECTOPASCAL = 45,
+  GpuCounterDescriptor_MeasureUnit_HERTZ = 46,
+  GpuCounterDescriptor_MeasureUnit_HORSEPOWER = 47,
+  GpuCounterDescriptor_MeasureUnit_HOUR = 48,
+  GpuCounterDescriptor_MeasureUnit_INCH = 49,
+  GpuCounterDescriptor_MeasureUnit_INCH_HG = 50,
+  GpuCounterDescriptor_MeasureUnit_JOULE = 51,
+  GpuCounterDescriptor_MeasureUnit_KARAT = 52,
+  GpuCounterDescriptor_MeasureUnit_KELVIN = 53,
+  GpuCounterDescriptor_MeasureUnit_KILOBIT = 54,
+  GpuCounterDescriptor_MeasureUnit_KILOBYTE = 55,
+  GpuCounterDescriptor_MeasureUnit_KILOCALORIE = 56,
+  GpuCounterDescriptor_MeasureUnit_KILOGRAM = 57,
+  GpuCounterDescriptor_MeasureUnit_KILOHERTZ = 58,
+  GpuCounterDescriptor_MeasureUnit_KILOJOULE = 59,
+  GpuCounterDescriptor_MeasureUnit_KILOMETER = 60,
+  GpuCounterDescriptor_MeasureUnit_KILOMETER_PER_HOUR = 61,
+  GpuCounterDescriptor_MeasureUnit_KILOWATT = 62,
+  GpuCounterDescriptor_MeasureUnit_KILOWATT_HOUR = 63,
+  GpuCounterDescriptor_MeasureUnit_KNOT = 64,
+  GpuCounterDescriptor_MeasureUnit_LIGHT_YEAR = 65,
+  GpuCounterDescriptor_MeasureUnit_LITER = 66,
+  GpuCounterDescriptor_MeasureUnit_LITER_PER_100KILOMETERS = 67,
+  GpuCounterDescriptor_MeasureUnit_LITER_PER_KILOMETER = 68,
+  GpuCounterDescriptor_MeasureUnit_LUX = 69,
+  GpuCounterDescriptor_MeasureUnit_MEGABIT = 70,
+  GpuCounterDescriptor_MeasureUnit_MEGABYTE = 71,
+  GpuCounterDescriptor_MeasureUnit_MEGAHERTZ = 72,
+  GpuCounterDescriptor_MeasureUnit_MEGALITER = 73,
+  GpuCounterDescriptor_MeasureUnit_MEGAWATT = 74,
+  GpuCounterDescriptor_MeasureUnit_METER = 75,
+  GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND = 76,
+  GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND_SQUARED = 77,
+  GpuCounterDescriptor_MeasureUnit_METRIC_TON = 78,
+  GpuCounterDescriptor_MeasureUnit_MICROGRAM = 79,
+  GpuCounterDescriptor_MeasureUnit_MICROMETER = 80,
+  GpuCounterDescriptor_MeasureUnit_MICROSECOND = 81,
+  GpuCounterDescriptor_MeasureUnit_MILE = 82,
+  GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON = 83,
+  GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON_IMPERIAL = 84,
+  GpuCounterDescriptor_MeasureUnit_MILE_PER_HOUR = 85,
+  GpuCounterDescriptor_MeasureUnit_MILE_SCANDINAVIAN = 86,
+  GpuCounterDescriptor_MeasureUnit_MILLIAMPERE = 87,
+  GpuCounterDescriptor_MeasureUnit_MILLIBAR = 88,
+  GpuCounterDescriptor_MeasureUnit_MILLIGRAM = 89,
+  GpuCounterDescriptor_MeasureUnit_MILLIGRAM_PER_DECILITER = 90,
+  GpuCounterDescriptor_MeasureUnit_MILLILITER = 91,
+  GpuCounterDescriptor_MeasureUnit_MILLIMETER = 92,
+  GpuCounterDescriptor_MeasureUnit_MILLIMETER_OF_MERCURY = 93,
+  GpuCounterDescriptor_MeasureUnit_MILLIMOLE_PER_LITER = 94,
+  GpuCounterDescriptor_MeasureUnit_MILLISECOND = 95,
+  GpuCounterDescriptor_MeasureUnit_MILLIWATT = 96,
+  GpuCounterDescriptor_MeasureUnit_MINUTE = 97,
+  GpuCounterDescriptor_MeasureUnit_MONTH = 98,
+  GpuCounterDescriptor_MeasureUnit_NANOMETER = 99,
+  GpuCounterDescriptor_MeasureUnit_NANOSECOND = 100,
+  GpuCounterDescriptor_MeasureUnit_NAUTICAL_MILE = 101,
+  GpuCounterDescriptor_MeasureUnit_OHM = 102,
+  GpuCounterDescriptor_MeasureUnit_OUNCE = 103,
+  GpuCounterDescriptor_MeasureUnit_OUNCE_TROY = 104,
+  GpuCounterDescriptor_MeasureUnit_PARSEC = 105,
+  GpuCounterDescriptor_MeasureUnit_PART_PER_MILLION = 106,
+  GpuCounterDescriptor_MeasureUnit_PICOMETER = 107,
+  GpuCounterDescriptor_MeasureUnit_PINT = 108,
+  GpuCounterDescriptor_MeasureUnit_PINT_METRIC = 109,
+  GpuCounterDescriptor_MeasureUnit_POINT = 110,
+  GpuCounterDescriptor_MeasureUnit_POUND = 111,
+  GpuCounterDescriptor_MeasureUnit_POUND_PER_SQUARE_INCH = 112,
+  GpuCounterDescriptor_MeasureUnit_QUART = 113,
+  GpuCounterDescriptor_MeasureUnit_RADIAN = 114,
+  GpuCounterDescriptor_MeasureUnit_REVOLUTION_ANGLE = 115,
+  GpuCounterDescriptor_MeasureUnit_SECOND = 116,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_CENTIMETER = 117,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_FOOT = 118,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_INCH = 119,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_KILOMETER = 120,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_METER = 121,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_MILE = 122,
+  GpuCounterDescriptor_MeasureUnit_SQUARE_YARD = 123,
+  GpuCounterDescriptor_MeasureUnit_STONE = 124,
+  GpuCounterDescriptor_MeasureUnit_TABLESPOON = 125,
+  GpuCounterDescriptor_MeasureUnit_TEASPOON = 126,
+  GpuCounterDescriptor_MeasureUnit_TERABIT = 127,
+  GpuCounterDescriptor_MeasureUnit_TERABYTE = 128,
+  GpuCounterDescriptor_MeasureUnit_TON = 129,
+  GpuCounterDescriptor_MeasureUnit_VOLT = 130,
+  GpuCounterDescriptor_MeasureUnit_WATT = 131,
+  GpuCounterDescriptor_MeasureUnit_WEEK = 132,
+  GpuCounterDescriptor_MeasureUnit_YARD = 133,
+  GpuCounterDescriptor_MeasureUnit_YEAR = 134
+};
+bool GpuCounterDescriptor_MeasureUnit_IsValid(int value);
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor_MeasureUnit_MeasureUnit_MIN = GpuCounterDescriptor_MeasureUnit_ACRE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor_MeasureUnit_MeasureUnit_MAX = GpuCounterDescriptor_MeasureUnit_YEAR;
+const int GpuCounterDescriptor_MeasureUnit_MeasureUnit_ARRAYSIZE = GpuCounterDescriptor_MeasureUnit_MeasureUnit_MAX + 1;
 
 // ===================================================================
 
@@ -8986,6 +9240,12 @@ class GpuCounterDescriptor_GpuCounterSpec : public ::google::protobuf::MessageLi
   }
 
   static const GpuCounterDescriptor_GpuCounterSpec& default_instance();
+
+  enum PeakValueCase {
+    kIntPeakValue = 5,
+    kDoublePeakValue = 6,
+    PEAK_VALUE_NOT_SET = 0,
+  };
 
   #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
   // Returns the internal default instance pointer. This function can
@@ -9068,6 +9328,28 @@ class GpuCounterDescriptor_GpuCounterSpec : public ::google::protobuf::MessageLi
   ::std::string* release_description();
   void set_allocated_description(::std::string* description);
 
+  // optional .perfetto.protos.GpuCounterDescriptor.MeasureUnit unit = 4;
+  bool has_unit() const;
+  void clear_unit();
+  static const int kUnitFieldNumber = 4;
+  ::perfetto::protos::GpuCounterDescriptor_MeasureUnit unit() const;
+  void set_unit(::perfetto::protos::GpuCounterDescriptor_MeasureUnit value);
+
+  // optional int64 int_peak_value = 5;
+  bool has_int_peak_value() const;
+  void clear_int_peak_value();
+  static const int kIntPeakValueFieldNumber = 5;
+  ::google::protobuf::int64 int_peak_value() const;
+  void set_int_peak_value(::google::protobuf::int64 value);
+
+  // optional double double_peak_value = 6;
+  bool has_double_peak_value() const;
+  void clear_double_peak_value();
+  static const int kDoublePeakValueFieldNumber = 6;
+  double double_peak_value() const;
+  void set_double_peak_value(double value);
+
+  PeakValueCase peak_value_case() const;
   // @@protoc_insertion_point(class_scope:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec)
  private:
   inline void set_has_counter_id();
@@ -9076,6 +9358,14 @@ class GpuCounterDescriptor_GpuCounterSpec : public ::google::protobuf::MessageLi
   inline void clear_has_name();
   inline void set_has_description();
   inline void clear_has_description();
+  inline void set_has_unit();
+  inline void clear_has_unit();
+  inline void set_has_int_peak_value();
+  inline void set_has_double_peak_value();
+
+  inline bool has_peak_value() const;
+  void clear_peak_value();
+  inline void clear_has_peak_value();
 
   ::google::protobuf::internal::ArenaStringPtr _unknown_fields_;
   ::google::protobuf::Arena* _arena_ptr_;
@@ -9083,8 +9373,16 @@ class GpuCounterDescriptor_GpuCounterSpec : public ::google::protobuf::MessageLi
   ::google::protobuf::uint32 _has_bits_[1];
   mutable int _cached_size_;
   ::google::protobuf::internal::ArenaStringPtr name_;
-  ::google::protobuf::internal::ArenaStringPtr description_;
   ::google::protobuf::uint32 counter_id_;
+  int unit_;
+  ::google::protobuf::internal::ArenaStringPtr description_;
+  union PeakValueUnion {
+    PeakValueUnion() {}
+    ::google::protobuf::int64 int_peak_value_;
+    double double_peak_value_;
+  } peak_value_;
+  ::google::protobuf::uint32 _oneof_case_[1];
+
   #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
   friend void  protobuf_AddDesc_perfetto_2fcommon_2fgpu_5fcounter_5fdescriptor_2eproto_impl();
   #else
@@ -9171,6 +9469,287 @@ class GpuCounterDescriptor : public ::google::protobuf::MessageLite {
   // nested types ----------------------------------------------------
 
   typedef GpuCounterDescriptor_GpuCounterSpec GpuCounterSpec;
+
+  typedef GpuCounterDescriptor_MeasureUnit MeasureUnit;
+  static const MeasureUnit ACRE =
+    GpuCounterDescriptor_MeasureUnit_ACRE;
+  static const MeasureUnit ACRE_FOOT =
+    GpuCounterDescriptor_MeasureUnit_ACRE_FOOT;
+  static const MeasureUnit AMPERE =
+    GpuCounterDescriptor_MeasureUnit_AMPERE;
+  static const MeasureUnit ARC_MINUTE =
+    GpuCounterDescriptor_MeasureUnit_ARC_MINUTE;
+  static const MeasureUnit ARC_SECOND =
+    GpuCounterDescriptor_MeasureUnit_ARC_SECOND;
+  static const MeasureUnit ASTRONOMICAL_UNIT =
+    GpuCounterDescriptor_MeasureUnit_ASTRONOMICAL_UNIT;
+  static const MeasureUnit BIT =
+    GpuCounterDescriptor_MeasureUnit_BIT;
+  static const MeasureUnit BUSHEL =
+    GpuCounterDescriptor_MeasureUnit_BUSHEL;
+  static const MeasureUnit BYTE =
+    GpuCounterDescriptor_MeasureUnit_BYTE;
+  static const MeasureUnit CALORIE =
+    GpuCounterDescriptor_MeasureUnit_CALORIE;
+  static const MeasureUnit CARAT =
+    GpuCounterDescriptor_MeasureUnit_CARAT;
+  static const MeasureUnit CELSIUS =
+    GpuCounterDescriptor_MeasureUnit_CELSIUS;
+  static const MeasureUnit CENTILITER =
+    GpuCounterDescriptor_MeasureUnit_CENTILITER;
+  static const MeasureUnit CENTIMETER =
+    GpuCounterDescriptor_MeasureUnit_CENTIMETER;
+  static const MeasureUnit CENTURY =
+    GpuCounterDescriptor_MeasureUnit_CENTURY;
+  static const MeasureUnit CUBIC_CENTIMETER =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_CENTIMETER;
+  static const MeasureUnit CUBIC_FOOT =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_FOOT;
+  static const MeasureUnit CUBIC_INCH =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_INCH;
+  static const MeasureUnit CUBIC_KILOMETER =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_KILOMETER;
+  static const MeasureUnit CUBIC_METER =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_METER;
+  static const MeasureUnit CUBIC_MILE =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_MILE;
+  static const MeasureUnit CUBIC_YARD =
+    GpuCounterDescriptor_MeasureUnit_CUBIC_YARD;
+  static const MeasureUnit CUP =
+    GpuCounterDescriptor_MeasureUnit_CUP;
+  static const MeasureUnit CUP_METRIC =
+    GpuCounterDescriptor_MeasureUnit_CUP_METRIC;
+  static const MeasureUnit DAY =
+    GpuCounterDescriptor_MeasureUnit_DAY;
+  static const MeasureUnit DECILITER =
+    GpuCounterDescriptor_MeasureUnit_DECILITER;
+  static const MeasureUnit DECIMETER =
+    GpuCounterDescriptor_MeasureUnit_DECIMETER;
+  static const MeasureUnit DEGREE =
+    GpuCounterDescriptor_MeasureUnit_DEGREE;
+  static const MeasureUnit FAHRENHEIT =
+    GpuCounterDescriptor_MeasureUnit_FAHRENHEIT;
+  static const MeasureUnit FATHOM =
+    GpuCounterDescriptor_MeasureUnit_FATHOM;
+  static const MeasureUnit FLUID_OUNCE =
+    GpuCounterDescriptor_MeasureUnit_FLUID_OUNCE;
+  static const MeasureUnit FOODCALORIE =
+    GpuCounterDescriptor_MeasureUnit_FOODCALORIE;
+  static const MeasureUnit FOOT =
+    GpuCounterDescriptor_MeasureUnit_FOOT;
+  static const MeasureUnit FURLONG =
+    GpuCounterDescriptor_MeasureUnit_FURLONG;
+  static const MeasureUnit GALLON =
+    GpuCounterDescriptor_MeasureUnit_GALLON;
+  static const MeasureUnit GALLON_IMPERIAL =
+    GpuCounterDescriptor_MeasureUnit_GALLON_IMPERIAL;
+  static const MeasureUnit GENERIC_TEMPERATURE =
+    GpuCounterDescriptor_MeasureUnit_GENERIC_TEMPERATURE;
+  static const MeasureUnit GIGABIT =
+    GpuCounterDescriptor_MeasureUnit_GIGABIT;
+  static const MeasureUnit GIGABYTE =
+    GpuCounterDescriptor_MeasureUnit_GIGABYTE;
+  static const MeasureUnit GIGAHERTZ =
+    GpuCounterDescriptor_MeasureUnit_GIGAHERTZ;
+  static const MeasureUnit GIGAWATT =
+    GpuCounterDescriptor_MeasureUnit_GIGAWATT;
+  static const MeasureUnit GRAM =
+    GpuCounterDescriptor_MeasureUnit_GRAM;
+  static const MeasureUnit G_FORCE =
+    GpuCounterDescriptor_MeasureUnit_G_FORCE;
+  static const MeasureUnit HECTARE =
+    GpuCounterDescriptor_MeasureUnit_HECTARE;
+  static const MeasureUnit HECTOLITER =
+    GpuCounterDescriptor_MeasureUnit_HECTOLITER;
+  static const MeasureUnit HECTOPASCAL =
+    GpuCounterDescriptor_MeasureUnit_HECTOPASCAL;
+  static const MeasureUnit HERTZ =
+    GpuCounterDescriptor_MeasureUnit_HERTZ;
+  static const MeasureUnit HORSEPOWER =
+    GpuCounterDescriptor_MeasureUnit_HORSEPOWER;
+  static const MeasureUnit HOUR =
+    GpuCounterDescriptor_MeasureUnit_HOUR;
+  static const MeasureUnit INCH =
+    GpuCounterDescriptor_MeasureUnit_INCH;
+  static const MeasureUnit INCH_HG =
+    GpuCounterDescriptor_MeasureUnit_INCH_HG;
+  static const MeasureUnit JOULE =
+    GpuCounterDescriptor_MeasureUnit_JOULE;
+  static const MeasureUnit KARAT =
+    GpuCounterDescriptor_MeasureUnit_KARAT;
+  static const MeasureUnit KELVIN =
+    GpuCounterDescriptor_MeasureUnit_KELVIN;
+  static const MeasureUnit KILOBIT =
+    GpuCounterDescriptor_MeasureUnit_KILOBIT;
+  static const MeasureUnit KILOBYTE =
+    GpuCounterDescriptor_MeasureUnit_KILOBYTE;
+  static const MeasureUnit KILOCALORIE =
+    GpuCounterDescriptor_MeasureUnit_KILOCALORIE;
+  static const MeasureUnit KILOGRAM =
+    GpuCounterDescriptor_MeasureUnit_KILOGRAM;
+  static const MeasureUnit KILOHERTZ =
+    GpuCounterDescriptor_MeasureUnit_KILOHERTZ;
+  static const MeasureUnit KILOJOULE =
+    GpuCounterDescriptor_MeasureUnit_KILOJOULE;
+  static const MeasureUnit KILOMETER =
+    GpuCounterDescriptor_MeasureUnit_KILOMETER;
+  static const MeasureUnit KILOMETER_PER_HOUR =
+    GpuCounterDescriptor_MeasureUnit_KILOMETER_PER_HOUR;
+  static const MeasureUnit KILOWATT =
+    GpuCounterDescriptor_MeasureUnit_KILOWATT;
+  static const MeasureUnit KILOWATT_HOUR =
+    GpuCounterDescriptor_MeasureUnit_KILOWATT_HOUR;
+  static const MeasureUnit KNOT =
+    GpuCounterDescriptor_MeasureUnit_KNOT;
+  static const MeasureUnit LIGHT_YEAR =
+    GpuCounterDescriptor_MeasureUnit_LIGHT_YEAR;
+  static const MeasureUnit LITER =
+    GpuCounterDescriptor_MeasureUnit_LITER;
+  static const MeasureUnit LITER_PER_100KILOMETERS =
+    GpuCounterDescriptor_MeasureUnit_LITER_PER_100KILOMETERS;
+  static const MeasureUnit LITER_PER_KILOMETER =
+    GpuCounterDescriptor_MeasureUnit_LITER_PER_KILOMETER;
+  static const MeasureUnit LUX =
+    GpuCounterDescriptor_MeasureUnit_LUX;
+  static const MeasureUnit MEGABIT =
+    GpuCounterDescriptor_MeasureUnit_MEGABIT;
+  static const MeasureUnit MEGABYTE =
+    GpuCounterDescriptor_MeasureUnit_MEGABYTE;
+  static const MeasureUnit MEGAHERTZ =
+    GpuCounterDescriptor_MeasureUnit_MEGAHERTZ;
+  static const MeasureUnit MEGALITER =
+    GpuCounterDescriptor_MeasureUnit_MEGALITER;
+  static const MeasureUnit MEGAWATT =
+    GpuCounterDescriptor_MeasureUnit_MEGAWATT;
+  static const MeasureUnit METER =
+    GpuCounterDescriptor_MeasureUnit_METER;
+  static const MeasureUnit METER_PER_SECOND =
+    GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND;
+  static const MeasureUnit METER_PER_SECOND_SQUARED =
+    GpuCounterDescriptor_MeasureUnit_METER_PER_SECOND_SQUARED;
+  static const MeasureUnit METRIC_TON =
+    GpuCounterDescriptor_MeasureUnit_METRIC_TON;
+  static const MeasureUnit MICROGRAM =
+    GpuCounterDescriptor_MeasureUnit_MICROGRAM;
+  static const MeasureUnit MICROMETER =
+    GpuCounterDescriptor_MeasureUnit_MICROMETER;
+  static const MeasureUnit MICROSECOND =
+    GpuCounterDescriptor_MeasureUnit_MICROSECOND;
+  static const MeasureUnit MILE =
+    GpuCounterDescriptor_MeasureUnit_MILE;
+  static const MeasureUnit MILE_PER_GALLON =
+    GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON;
+  static const MeasureUnit MILE_PER_GALLON_IMPERIAL =
+    GpuCounterDescriptor_MeasureUnit_MILE_PER_GALLON_IMPERIAL;
+  static const MeasureUnit MILE_PER_HOUR =
+    GpuCounterDescriptor_MeasureUnit_MILE_PER_HOUR;
+  static const MeasureUnit MILE_SCANDINAVIAN =
+    GpuCounterDescriptor_MeasureUnit_MILE_SCANDINAVIAN;
+  static const MeasureUnit MILLIAMPERE =
+    GpuCounterDescriptor_MeasureUnit_MILLIAMPERE;
+  static const MeasureUnit MILLIBAR =
+    GpuCounterDescriptor_MeasureUnit_MILLIBAR;
+  static const MeasureUnit MILLIGRAM =
+    GpuCounterDescriptor_MeasureUnit_MILLIGRAM;
+  static const MeasureUnit MILLIGRAM_PER_DECILITER =
+    GpuCounterDescriptor_MeasureUnit_MILLIGRAM_PER_DECILITER;
+  static const MeasureUnit MILLILITER =
+    GpuCounterDescriptor_MeasureUnit_MILLILITER;
+  static const MeasureUnit MILLIMETER =
+    GpuCounterDescriptor_MeasureUnit_MILLIMETER;
+  static const MeasureUnit MILLIMETER_OF_MERCURY =
+    GpuCounterDescriptor_MeasureUnit_MILLIMETER_OF_MERCURY;
+  static const MeasureUnit MILLIMOLE_PER_LITER =
+    GpuCounterDescriptor_MeasureUnit_MILLIMOLE_PER_LITER;
+  static const MeasureUnit MILLISECOND =
+    GpuCounterDescriptor_MeasureUnit_MILLISECOND;
+  static const MeasureUnit MILLIWATT =
+    GpuCounterDescriptor_MeasureUnit_MILLIWATT;
+  static const MeasureUnit MINUTE =
+    GpuCounterDescriptor_MeasureUnit_MINUTE;
+  static const MeasureUnit MONTH =
+    GpuCounterDescriptor_MeasureUnit_MONTH;
+  static const MeasureUnit NANOMETER =
+    GpuCounterDescriptor_MeasureUnit_NANOMETER;
+  static const MeasureUnit NANOSECOND =
+    GpuCounterDescriptor_MeasureUnit_NANOSECOND;
+  static const MeasureUnit NAUTICAL_MILE =
+    GpuCounterDescriptor_MeasureUnit_NAUTICAL_MILE;
+  static const MeasureUnit OHM =
+    GpuCounterDescriptor_MeasureUnit_OHM;
+  static const MeasureUnit OUNCE =
+    GpuCounterDescriptor_MeasureUnit_OUNCE;
+  static const MeasureUnit OUNCE_TROY =
+    GpuCounterDescriptor_MeasureUnit_OUNCE_TROY;
+  static const MeasureUnit PARSEC =
+    GpuCounterDescriptor_MeasureUnit_PARSEC;
+  static const MeasureUnit PART_PER_MILLION =
+    GpuCounterDescriptor_MeasureUnit_PART_PER_MILLION;
+  static const MeasureUnit PICOMETER =
+    GpuCounterDescriptor_MeasureUnit_PICOMETER;
+  static const MeasureUnit PINT =
+    GpuCounterDescriptor_MeasureUnit_PINT;
+  static const MeasureUnit PINT_METRIC =
+    GpuCounterDescriptor_MeasureUnit_PINT_METRIC;
+  static const MeasureUnit POINT =
+    GpuCounterDescriptor_MeasureUnit_POINT;
+  static const MeasureUnit POUND =
+    GpuCounterDescriptor_MeasureUnit_POUND;
+  static const MeasureUnit POUND_PER_SQUARE_INCH =
+    GpuCounterDescriptor_MeasureUnit_POUND_PER_SQUARE_INCH;
+  static const MeasureUnit QUART =
+    GpuCounterDescriptor_MeasureUnit_QUART;
+  static const MeasureUnit RADIAN =
+    GpuCounterDescriptor_MeasureUnit_RADIAN;
+  static const MeasureUnit REVOLUTION_ANGLE =
+    GpuCounterDescriptor_MeasureUnit_REVOLUTION_ANGLE;
+  static const MeasureUnit SECOND =
+    GpuCounterDescriptor_MeasureUnit_SECOND;
+  static const MeasureUnit SQUARE_CENTIMETER =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_CENTIMETER;
+  static const MeasureUnit SQUARE_FOOT =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_FOOT;
+  static const MeasureUnit SQUARE_INCH =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_INCH;
+  static const MeasureUnit SQUARE_KILOMETER =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_KILOMETER;
+  static const MeasureUnit SQUARE_METER =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_METER;
+  static const MeasureUnit SQUARE_MILE =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_MILE;
+  static const MeasureUnit SQUARE_YARD =
+    GpuCounterDescriptor_MeasureUnit_SQUARE_YARD;
+  static const MeasureUnit STONE =
+    GpuCounterDescriptor_MeasureUnit_STONE;
+  static const MeasureUnit TABLESPOON =
+    GpuCounterDescriptor_MeasureUnit_TABLESPOON;
+  static const MeasureUnit TEASPOON =
+    GpuCounterDescriptor_MeasureUnit_TEASPOON;
+  static const MeasureUnit TERABIT =
+    GpuCounterDescriptor_MeasureUnit_TERABIT;
+  static const MeasureUnit TERABYTE =
+    GpuCounterDescriptor_MeasureUnit_TERABYTE;
+  static const MeasureUnit TON =
+    GpuCounterDescriptor_MeasureUnit_TON;
+  static const MeasureUnit VOLT =
+    GpuCounterDescriptor_MeasureUnit_VOLT;
+  static const MeasureUnit WATT =
+    GpuCounterDescriptor_MeasureUnit_WATT;
+  static const MeasureUnit WEEK =
+    GpuCounterDescriptor_MeasureUnit_WEEK;
+  static const MeasureUnit YARD =
+    GpuCounterDescriptor_MeasureUnit_YARD;
+  static const MeasureUnit YEAR =
+    GpuCounterDescriptor_MeasureUnit_YEAR;
+  static inline bool MeasureUnit_IsValid(int value) {
+    return GpuCounterDescriptor_MeasureUnit_IsValid(value);
+  }
+  static const MeasureUnit MeasureUnit_MIN =
+    GpuCounterDescriptor_MeasureUnit_MeasureUnit_MIN;
+  static const MeasureUnit MeasureUnit_MAX =
+    GpuCounterDescriptor_MeasureUnit_MeasureUnit_MAX;
+  static const int MeasureUnit_ARRAYSIZE =
+    GpuCounterDescriptor_MeasureUnit_MeasureUnit_ARRAYSIZE;
 
   // accessors -------------------------------------------------------
 
@@ -9346,6 +9925,98 @@ inline void GpuCounterDescriptor_GpuCounterSpec::set_allocated_description(::std
   // @@protoc_insertion_point(field_set_allocated:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.description)
 }
 
+// optional .perfetto.protos.GpuCounterDescriptor.MeasureUnit unit = 4;
+inline bool GpuCounterDescriptor_GpuCounterSpec::has_unit() const {
+  return (_has_bits_[0] & 0x00000008u) != 0;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::set_has_unit() {
+  _has_bits_[0] |= 0x00000008u;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::clear_has_unit() {
+  _has_bits_[0] &= ~0x00000008u;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::clear_unit() {
+  unit_ = 0;
+  clear_has_unit();
+}
+inline ::perfetto::protos::GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor_GpuCounterSpec::unit() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.unit)
+  return static_cast< ::perfetto::protos::GpuCounterDescriptor_MeasureUnit >(unit_);
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::set_unit(::perfetto::protos::GpuCounterDescriptor_MeasureUnit value) {
+  assert(::perfetto::protos::GpuCounterDescriptor_MeasureUnit_IsValid(value));
+  set_has_unit();
+  unit_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.unit)
+}
+
+// optional int64 int_peak_value = 5;
+inline bool GpuCounterDescriptor_GpuCounterSpec::has_int_peak_value() const {
+  return peak_value_case() == kIntPeakValue;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::set_has_int_peak_value() {
+  _oneof_case_[0] = kIntPeakValue;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::clear_int_peak_value() {
+  if (has_int_peak_value()) {
+    peak_value_.int_peak_value_ = GOOGLE_LONGLONG(0);
+    clear_has_peak_value();
+  }
+}
+inline ::google::protobuf::int64 GpuCounterDescriptor_GpuCounterSpec::int_peak_value() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.int_peak_value)
+  if (has_int_peak_value()) {
+    return peak_value_.int_peak_value_;
+  }
+  return GOOGLE_LONGLONG(0);
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::set_int_peak_value(::google::protobuf::int64 value) {
+  if (!has_int_peak_value()) {
+    clear_peak_value();
+    set_has_int_peak_value();
+  }
+  peak_value_.int_peak_value_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.int_peak_value)
+}
+
+// optional double double_peak_value = 6;
+inline bool GpuCounterDescriptor_GpuCounterSpec::has_double_peak_value() const {
+  return peak_value_case() == kDoublePeakValue;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::set_has_double_peak_value() {
+  _oneof_case_[0] = kDoublePeakValue;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::clear_double_peak_value() {
+  if (has_double_peak_value()) {
+    peak_value_.double_peak_value_ = 0;
+    clear_has_peak_value();
+  }
+}
+inline double GpuCounterDescriptor_GpuCounterSpec::double_peak_value() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.double_peak_value)
+  if (has_double_peak_value()) {
+    return peak_value_.double_peak_value_;
+  }
+  return 0;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::set_double_peak_value(double value) {
+  if (!has_double_peak_value()) {
+    clear_peak_value();
+    set_has_double_peak_value();
+  }
+  peak_value_.double_peak_value_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.double_peak_value)
+}
+
+inline bool GpuCounterDescriptor_GpuCounterSpec::has_peak_value() const {
+  return peak_value_case() != PEAK_VALUE_NOT_SET;
+}
+inline void GpuCounterDescriptor_GpuCounterSpec::clear_has_peak_value() {
+  _oneof_case_[0] = PEAK_VALUE_NOT_SET;
+}
+inline GpuCounterDescriptor_GpuCounterSpec::PeakValueCase GpuCounterDescriptor_GpuCounterSpec::peak_value_case() const {
+  return GpuCounterDescriptor_GpuCounterSpec::PeakValueCase(_oneof_case_[0]);
+}
 // -------------------------------------------------------------------
 
 // GpuCounterDescriptor
@@ -9388,6 +10059,16 @@ GpuCounterDescriptor::specs() const {
 
 }  // namespace protos
 }  // namespace perfetto
+
+#ifndef SWIG
+namespace google {
+namespace protobuf {
+
+template <> struct is_proto_enum< ::perfetto::protos::GpuCounterDescriptor_MeasureUnit> : ::google::protobuf::internal::true_type {};
+
+}  // namespace protobuf
+}  // namespace google
+#endif  // SWIG
 
 // @@protoc_insertion_point(global_scope)
 
@@ -17728,6 +18409,289 @@ static ::std::string* MutableUnknownFieldsForGpuCounterDescriptor(
   return ptr->mutable_unknown_fields();
 }
 
+bool GpuCounterDescriptor_MeasureUnit_IsValid(int value) {
+  switch(value) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 10:
+    case 11:
+    case 12:
+    case 13:
+    case 14:
+    case 15:
+    case 16:
+    case 17:
+    case 18:
+    case 19:
+    case 20:
+    case 21:
+    case 22:
+    case 23:
+    case 24:
+    case 25:
+    case 26:
+    case 27:
+    case 28:
+    case 29:
+    case 30:
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 35:
+    case 36:
+    case 37:
+    case 38:
+    case 39:
+    case 40:
+    case 41:
+    case 42:
+    case 43:
+    case 44:
+    case 45:
+    case 46:
+    case 47:
+    case 48:
+    case 49:
+    case 50:
+    case 51:
+    case 52:
+    case 53:
+    case 54:
+    case 55:
+    case 56:
+    case 57:
+    case 58:
+    case 59:
+    case 60:
+    case 61:
+    case 62:
+    case 63:
+    case 64:
+    case 65:
+    case 66:
+    case 67:
+    case 68:
+    case 69:
+    case 70:
+    case 71:
+    case 72:
+    case 73:
+    case 74:
+    case 75:
+    case 76:
+    case 77:
+    case 78:
+    case 79:
+    case 80:
+    case 81:
+    case 82:
+    case 83:
+    case 84:
+    case 85:
+    case 86:
+    case 87:
+    case 88:
+    case 89:
+    case 90:
+    case 91:
+    case 92:
+    case 93:
+    case 94:
+    case 95:
+    case 96:
+    case 97:
+    case 98:
+    case 99:
+    case 100:
+    case 101:
+    case 102:
+    case 103:
+    case 104:
+    case 105:
+    case 106:
+    case 107:
+    case 108:
+    case 109:
+    case 110:
+    case 111:
+    case 112:
+    case 113:
+    case 114:
+    case 115:
+    case 116:
+    case 117:
+    case 118:
+    case 119:
+    case 120:
+    case 121:
+    case 122:
+    case 123:
+    case 124:
+    case 125:
+    case 126:
+    case 127:
+    case 128:
+    case 129:
+    case 130:
+    case 131:
+    case 132:
+    case 133:
+    case 134:
+      return true;
+    default:
+      return false;
+  }
+}
+
+#if !defined(_MSC_VER) || _MSC_VER >= 1900
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::ACRE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::ACRE_FOOT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::AMPERE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::ARC_MINUTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::ARC_SECOND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::ASTRONOMICAL_UNIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::BIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::BUSHEL;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::BYTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CALORIE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CARAT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CELSIUS;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CENTILITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CENTIMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CENTURY;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_CENTIMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_FOOT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_INCH;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_KILOMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_METER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_MILE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUBIC_YARD;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUP;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::CUP_METRIC;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::DAY;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::DECILITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::DECIMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::DEGREE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::FAHRENHEIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::FATHOM;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::FLUID_OUNCE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::FOODCALORIE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::FOOT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::FURLONG;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GALLON;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GALLON_IMPERIAL;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GENERIC_TEMPERATURE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GIGABIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GIGABYTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GIGAHERTZ;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GIGAWATT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::GRAM;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::G_FORCE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::HECTARE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::HECTOLITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::HECTOPASCAL;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::HERTZ;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::HORSEPOWER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::HOUR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::INCH;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::INCH_HG;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::JOULE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KARAT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KELVIN;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOBIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOBYTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOCALORIE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOGRAM;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOHERTZ;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOJOULE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOMETER_PER_HOUR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOWATT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KILOWATT_HOUR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::KNOT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::LIGHT_YEAR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::LITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::LITER_PER_100KILOMETERS;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::LITER_PER_KILOMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::LUX;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MEGABIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MEGABYTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MEGAHERTZ;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MEGALITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MEGAWATT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::METER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::METER_PER_SECOND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::METER_PER_SECOND_SQUARED;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::METRIC_TON;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MICROGRAM;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MICROMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MICROSECOND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILE_PER_GALLON;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILE_PER_GALLON_IMPERIAL;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILE_PER_HOUR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILE_SCANDINAVIAN;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIAMPERE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIBAR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIGRAM;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIGRAM_PER_DECILITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLILITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIMETER_OF_MERCURY;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIMOLE_PER_LITER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLISECOND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MILLIWATT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MINUTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MONTH;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::NANOMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::NANOSECOND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::NAUTICAL_MILE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::OHM;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::OUNCE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::OUNCE_TROY;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::PARSEC;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::PART_PER_MILLION;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::PICOMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::PINT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::PINT_METRIC;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::POINT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::POUND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::POUND_PER_SQUARE_INCH;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::QUART;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::RADIAN;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::REVOLUTION_ANGLE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SECOND;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_CENTIMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_FOOT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_INCH;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_KILOMETER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_METER;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_MILE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::SQUARE_YARD;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::STONE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::TABLESPOON;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::TEASPOON;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::TERABIT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::TERABYTE;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::TON;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::VOLT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::WATT;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::WEEK;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::YARD;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::YEAR;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MeasureUnit_MIN;
+const GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor::MeasureUnit_MAX;
+const int GpuCounterDescriptor::MeasureUnit_ARRAYSIZE;
+#endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 static ::std::string* MutableUnknownFieldsForGpuCounterDescriptor_GpuCounterSpec(
     GpuCounterDescriptor_GpuCounterSpec* ptr) {
   return ptr->mutable_unknown_fields();
@@ -17737,6 +18701,9 @@ static ::std::string* MutableUnknownFieldsForGpuCounterDescriptor_GpuCounterSpec
 const int GpuCounterDescriptor_GpuCounterSpec::kCounterIdFieldNumber;
 const int GpuCounterDescriptor_GpuCounterSpec::kNameFieldNumber;
 const int GpuCounterDescriptor_GpuCounterSpec::kDescriptionFieldNumber;
+const int GpuCounterDescriptor_GpuCounterSpec::kUnitFieldNumber;
+const int GpuCounterDescriptor_GpuCounterSpec::kIntPeakValueFieldNumber;
+const int GpuCounterDescriptor_GpuCounterSpec::kDoublePeakValueFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
 GpuCounterDescriptor_GpuCounterSpec::GpuCounterDescriptor_GpuCounterSpec()
@@ -17764,7 +18731,9 @@ void GpuCounterDescriptor_GpuCounterSpec::SharedCtor() {
   counter_id_ = 0u;
   name_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
   description_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  unit_ = 0;
   ::memset(_has_bits_, 0, sizeof(_has_bits_));
+  clear_has_peak_value();
 }
 
 GpuCounterDescriptor_GpuCounterSpec::~GpuCounterDescriptor_GpuCounterSpec() {
@@ -17777,6 +18746,9 @@ void GpuCounterDescriptor_GpuCounterSpec::SharedDtor() {
       &::google::protobuf::internal::GetEmptyStringAlreadyInited());
   name_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
   description_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  if (has_peak_value()) {
+    clear_peak_value();
+  }
   #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
   if (this != &default_instance()) {
   #else
@@ -17809,10 +18781,45 @@ GpuCounterDescriptor_GpuCounterSpec* GpuCounterDescriptor_GpuCounterSpec::New(::
   return n;
 }
 
+void GpuCounterDescriptor_GpuCounterSpec::clear_peak_value() {
+// @@protoc_insertion_point(one_of_clear_start:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec)
+  switch(peak_value_case()) {
+    case kIntPeakValue: {
+      // No need to clear
+      break;
+    }
+    case kDoublePeakValue: {
+      // No need to clear
+      break;
+    }
+    case PEAK_VALUE_NOT_SET: {
+      break;
+    }
+  }
+  _oneof_case_[0] = PEAK_VALUE_NOT_SET;
+}
+
+
 void GpuCounterDescriptor_GpuCounterSpec::Clear() {
 // @@protoc_insertion_point(message_clear_start:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec)
-  if (_has_bits_[0 / 32] & 7u) {
-    counter_id_ = 0u;
+#if defined(__clang__)
+#define ZR_HELPER_(f) \
+  _Pragma("clang diagnostic push") \
+  _Pragma("clang diagnostic ignored \"-Winvalid-offsetof\"") \
+  __builtin_offsetof(GpuCounterDescriptor_GpuCounterSpec, f) \
+  _Pragma("clang diagnostic pop")
+#else
+#define ZR_HELPER_(f) reinterpret_cast<char*>(\
+  &reinterpret_cast<GpuCounterDescriptor_GpuCounterSpec*>(16)->f)
+#endif
+
+#define ZR_(first, last) do {\
+  ::memset(&first, 0,\
+           ZR_HELPER_(last) - ZR_HELPER_(first) + sizeof(last));\
+} while (0)
+
+  if (_has_bits_[0 / 32] & 15u) {
+    ZR_(counter_id_, unit_);
     if (has_name()) {
       name_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
     }
@@ -17820,6 +18827,11 @@ void GpuCounterDescriptor_GpuCounterSpec::Clear() {
       description_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
     }
   }
+
+#undef ZR_HELPER_
+#undef ZR_
+
+  clear_peak_value();
   ::memset(_has_bits_, 0, sizeof(_has_bits_));
   _unknown_fields_.ClearToEmptyNoArena(
       &::google::protobuf::internal::GetEmptyStringAlreadyInited());
@@ -17876,6 +18888,59 @@ bool GpuCounterDescriptor_GpuCounterSpec::MergePartialFromCodedStream(
         } else {
           goto handle_unusual;
         }
+        if (input->ExpectTag(32)) goto parse_unit;
+        break;
+      }
+
+      // optional .perfetto.protos.GpuCounterDescriptor.MeasureUnit unit = 4;
+      case 4: {
+        if (tag == 32) {
+         parse_unit:
+          int value;
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
+                   int, ::google::protobuf::internal::WireFormatLite::TYPE_ENUM>(
+                 input, &value)));
+          if (::perfetto::protos::GpuCounterDescriptor_MeasureUnit_IsValid(value)) {
+            set_unit(static_cast< ::perfetto::protos::GpuCounterDescriptor_MeasureUnit >(value));
+          } else {
+            unknown_fields_stream.WriteVarint32(32);
+            unknown_fields_stream.WriteVarint32(value);
+          }
+        } else {
+          goto handle_unusual;
+        }
+        if (input->ExpectTag(40)) goto parse_int_peak_value;
+        break;
+      }
+
+      // optional int64 int_peak_value = 5;
+      case 5: {
+        if (tag == 40) {
+         parse_int_peak_value:
+          clear_peak_value();
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
+                   ::google::protobuf::int64, ::google::protobuf::internal::WireFormatLite::TYPE_INT64>(
+                 input, &peak_value_.int_peak_value_)));
+          set_has_int_peak_value();
+        } else {
+          goto handle_unusual;
+        }
+        if (input->ExpectTag(49)) goto parse_double_peak_value;
+        break;
+      }
+
+      // optional double double_peak_value = 6;
+      case 6: {
+        if (tag == 49) {
+         parse_double_peak_value:
+          clear_peak_value();
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
+                   double, ::google::protobuf::internal::WireFormatLite::TYPE_DOUBLE>(
+                 input, &peak_value_.double_peak_value_)));
+          set_has_double_peak_value();
+        } else {
+          goto handle_unusual;
+        }
         if (input->ExpectAtEnd()) goto success;
         break;
       }
@@ -17922,6 +18987,22 @@ void GpuCounterDescriptor_GpuCounterSpec::SerializeWithCachedSizes(
       3, this->description(), output);
   }
 
+  // optional .perfetto.protos.GpuCounterDescriptor.MeasureUnit unit = 4;
+  if (has_unit()) {
+    ::google::protobuf::internal::WireFormatLite::WriteEnum(
+      4, this->unit(), output);
+  }
+
+  // optional int64 int_peak_value = 5;
+  if (has_int_peak_value()) {
+    ::google::protobuf::internal::WireFormatLite::WriteInt64(5, this->int_peak_value(), output);
+  }
+
+  // optional double double_peak_value = 6;
+  if (has_double_peak_value()) {
+    ::google::protobuf::internal::WireFormatLite::WriteDouble(6, this->double_peak_value(), output);
+  }
+
   output->WriteRaw(unknown_fields().data(),
                    static_cast<int>(unknown_fields().size()));
   // @@protoc_insertion_point(serialize_end:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec)
@@ -17931,7 +19012,7 @@ int GpuCounterDescriptor_GpuCounterSpec::ByteSize() const {
 // @@protoc_insertion_point(message_byte_size_start:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec)
   int total_size = 0;
 
-  if (_has_bits_[0 / 32] & 7u) {
+  if (_has_bits_[0 / 32] & 15u) {
     // optional uint32 counter_id = 1;
     if (has_counter_id()) {
       total_size += 1 +
@@ -17953,6 +19034,29 @@ int GpuCounterDescriptor_GpuCounterSpec::ByteSize() const {
           this->description());
     }
 
+    // optional .perfetto.protos.GpuCounterDescriptor.MeasureUnit unit = 4;
+    if (has_unit()) {
+      total_size += 1 +
+        ::google::protobuf::internal::WireFormatLite::EnumSize(this->unit());
+    }
+
+  }
+  switch (peak_value_case()) {
+    // optional int64 int_peak_value = 5;
+    case kIntPeakValue: {
+      total_size += 1 +
+        ::google::protobuf::internal::WireFormatLite::Int64Size(
+          this->int_peak_value());
+      break;
+    }
+    // optional double double_peak_value = 6;
+    case kDoublePeakValue: {
+      total_size += 1 + 8;
+      break;
+    }
+    case PEAK_VALUE_NOT_SET: {
+      break;
+    }
   }
   total_size += unknown_fields().size();
 
@@ -17970,6 +19074,19 @@ void GpuCounterDescriptor_GpuCounterSpec::CheckTypeAndMergeFrom(
 void GpuCounterDescriptor_GpuCounterSpec::MergeFrom(const GpuCounterDescriptor_GpuCounterSpec& from) {
 // @@protoc_insertion_point(class_specific_merge_from_start:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec)
   if (GOOGLE_PREDICT_FALSE(&from == this)) gpu_counter_descriptor_pb_MergeFromFail(__LINE__);
+  switch (from.peak_value_case()) {
+    case kIntPeakValue: {
+      set_int_peak_value(from.int_peak_value());
+      break;
+    }
+    case kDoublePeakValue: {
+      set_double_peak_value(from.double_peak_value());
+      break;
+    }
+    case PEAK_VALUE_NOT_SET: {
+      break;
+    }
+  }
   if (from._has_bits_[0 / 32] & (0xffu << (0 % 32))) {
     if (from.has_counter_id()) {
       set_counter_id(from.counter_id());
@@ -17981,6 +19098,9 @@ void GpuCounterDescriptor_GpuCounterSpec::MergeFrom(const GpuCounterDescriptor_G
     if (from.has_description()) {
       set_has_description();
       description_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.description_);
+    }
+    if (from.has_unit()) {
+      set_unit(from.unit());
     }
   }
   if (!from.unknown_fields().empty()) {
@@ -18008,6 +19128,9 @@ void GpuCounterDescriptor_GpuCounterSpec::InternalSwap(GpuCounterDescriptor_GpuC
   std::swap(counter_id_, other->counter_id_);
   name_.Swap(&other->name_);
   description_.Swap(&other->description_);
+  std::swap(unit_, other->unit_);
+  std::swap(peak_value_, other->peak_value_);
+  std::swap(_oneof_case_[0], other->_oneof_case_[0]);
   std::swap(_has_bits_[0], other->_has_bits_[0]);
   _unknown_fields_.Swap(&other->_unknown_fields_);
   std::swap(_cached_size_, other->_cached_size_);
@@ -18360,6 +19483,98 @@ void GpuCounterDescriptor_GpuCounterSpec::clear_description() {
   // @@protoc_insertion_point(field_set_allocated:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.description)
 }
 
+// optional .perfetto.protos.GpuCounterDescriptor.MeasureUnit unit = 4;
+bool GpuCounterDescriptor_GpuCounterSpec::has_unit() const {
+  return (_has_bits_[0] & 0x00000008u) != 0;
+}
+void GpuCounterDescriptor_GpuCounterSpec::set_has_unit() {
+  _has_bits_[0] |= 0x00000008u;
+}
+void GpuCounterDescriptor_GpuCounterSpec::clear_has_unit() {
+  _has_bits_[0] &= ~0x00000008u;
+}
+void GpuCounterDescriptor_GpuCounterSpec::clear_unit() {
+  unit_ = 0;
+  clear_has_unit();
+}
+ ::perfetto::protos::GpuCounterDescriptor_MeasureUnit GpuCounterDescriptor_GpuCounterSpec::unit() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.unit)
+  return static_cast< ::perfetto::protos::GpuCounterDescriptor_MeasureUnit >(unit_);
+}
+ void GpuCounterDescriptor_GpuCounterSpec::set_unit(::perfetto::protos::GpuCounterDescriptor_MeasureUnit value) {
+  assert(::perfetto::protos::GpuCounterDescriptor_MeasureUnit_IsValid(value));
+  set_has_unit();
+  unit_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.unit)
+}
+
+// optional int64 int_peak_value = 5;
+bool GpuCounterDescriptor_GpuCounterSpec::has_int_peak_value() const {
+  return peak_value_case() == kIntPeakValue;
+}
+void GpuCounterDescriptor_GpuCounterSpec::set_has_int_peak_value() {
+  _oneof_case_[0] = kIntPeakValue;
+}
+void GpuCounterDescriptor_GpuCounterSpec::clear_int_peak_value() {
+  if (has_int_peak_value()) {
+    peak_value_.int_peak_value_ = GOOGLE_LONGLONG(0);
+    clear_has_peak_value();
+  }
+}
+ ::google::protobuf::int64 GpuCounterDescriptor_GpuCounterSpec::int_peak_value() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.int_peak_value)
+  if (has_int_peak_value()) {
+    return peak_value_.int_peak_value_;
+  }
+  return GOOGLE_LONGLONG(0);
+}
+ void GpuCounterDescriptor_GpuCounterSpec::set_int_peak_value(::google::protobuf::int64 value) {
+  if (!has_int_peak_value()) {
+    clear_peak_value();
+    set_has_int_peak_value();
+  }
+  peak_value_.int_peak_value_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.int_peak_value)
+}
+
+// optional double double_peak_value = 6;
+bool GpuCounterDescriptor_GpuCounterSpec::has_double_peak_value() const {
+  return peak_value_case() == kDoublePeakValue;
+}
+void GpuCounterDescriptor_GpuCounterSpec::set_has_double_peak_value() {
+  _oneof_case_[0] = kDoublePeakValue;
+}
+void GpuCounterDescriptor_GpuCounterSpec::clear_double_peak_value() {
+  if (has_double_peak_value()) {
+    peak_value_.double_peak_value_ = 0;
+    clear_has_peak_value();
+  }
+}
+ double GpuCounterDescriptor_GpuCounterSpec::double_peak_value() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.double_peak_value)
+  if (has_double_peak_value()) {
+    return peak_value_.double_peak_value_;
+  }
+  return 0;
+}
+ void GpuCounterDescriptor_GpuCounterSpec::set_double_peak_value(double value) {
+  if (!has_double_peak_value()) {
+    clear_peak_value();
+    set_has_double_peak_value();
+  }
+  peak_value_.double_peak_value_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.GpuCounterDescriptor.GpuCounterSpec.double_peak_value)
+}
+
+bool GpuCounterDescriptor_GpuCounterSpec::has_peak_value() const {
+  return peak_value_case() != PEAK_VALUE_NOT_SET;
+}
+void GpuCounterDescriptor_GpuCounterSpec::clear_has_peak_value() {
+  _oneof_case_[0] = PEAK_VALUE_NOT_SET;
+}
+GpuCounterDescriptor_GpuCounterSpec::PeakValueCase GpuCounterDescriptor_GpuCounterSpec::peak_value_case() const {
+  return GpuCounterDescriptor_GpuCounterSpec::PeakValueCase(_oneof_case_[0]);
+}
 // -------------------------------------------------------------------
 
 // GpuCounterDescriptor
@@ -29762,6 +30977,13 @@ class HeapprofdConfig : public ::google::protobuf::MessageLite {
   bool idle_allocations() const;
   void set_idle_allocations(bool value);
 
+  // optional bool dump_at_max = 13;
+  bool has_dump_at_max() const;
+  void clear_dump_at_max();
+  static const int kDumpAtMaxFieldNumber = 13;
+  bool dump_at_max() const;
+  void set_dump_at_max(bool value);
+
   // @@protoc_insertion_point(class_scope:perfetto.protos.HeapprofdConfig)
  private:
   inline void set_has_sampling_interval_bytes();
@@ -29780,6 +31002,8 @@ class HeapprofdConfig : public ::google::protobuf::MessageLite {
   inline void clear_has_no_running();
   inline void set_has_idle_allocations();
   inline void clear_has_idle_allocations();
+  inline void set_has_dump_at_max();
+  inline void clear_has_dump_at_max();
 
   ::google::protobuf::internal::ArenaStringPtr _unknown_fields_;
   ::google::protobuf::Arena* _arena_ptr_;
@@ -29797,6 +31021,7 @@ class HeapprofdConfig : public ::google::protobuf::MessageLite {
   bool no_startup_;
   bool no_running_;
   bool idle_allocations_;
+  bool dump_at_max_;
   #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
   friend void  protobuf_AddDesc_perfetto_2fconfig_2fprofiling_2fheapprofd_5fconfig_2eproto_impl();
   #else
@@ -30222,6 +31447,30 @@ inline void HeapprofdConfig::set_idle_allocations(bool value) {
   set_has_idle_allocations();
   idle_allocations_ = value;
   // @@protoc_insertion_point(field_set:perfetto.protos.HeapprofdConfig.idle_allocations)
+}
+
+// optional bool dump_at_max = 13;
+inline bool HeapprofdConfig::has_dump_at_max() const {
+  return (_has_bits_[0] & 0x00000800u) != 0;
+}
+inline void HeapprofdConfig::set_has_dump_at_max() {
+  _has_bits_[0] |= 0x00000800u;
+}
+inline void HeapprofdConfig::clear_has_dump_at_max() {
+  _has_bits_[0] &= ~0x00000800u;
+}
+inline void HeapprofdConfig::clear_dump_at_max() {
+  dump_at_max_ = false;
+  clear_has_dump_at_max();
+}
+inline bool HeapprofdConfig::dump_at_max() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.HeapprofdConfig.dump_at_max)
+  return dump_at_max_;
+}
+inline void HeapprofdConfig::set_dump_at_max(bool value) {
+  set_has_dump_at_max();
+  dump_at_max_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.HeapprofdConfig.dump_at_max)
 }
 
 #endif  // !PROTOBUF_INLINE_NOT_IN_HEADERS
@@ -38004,6 +39253,7 @@ const int HeapprofdConfig::kBlockClientFieldNumber;
 const int HeapprofdConfig::kNoStartupFieldNumber;
 const int HeapprofdConfig::kNoRunningFieldNumber;
 const int HeapprofdConfig::kIdleAllocationsFieldNumber;
+const int HeapprofdConfig::kDumpAtMaxFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
 HeapprofdConfig::HeapprofdConfig()
@@ -38042,6 +39292,7 @@ void HeapprofdConfig::SharedCtor() {
   no_startup_ = false;
   no_running_ = false;
   idle_allocations_ = false;
+  dump_at_max_ = false;
   ::memset(_has_bits_, 0, sizeof(_has_bits_));
 }
 
@@ -38111,7 +39362,7 @@ void HeapprofdConfig::Clear() {
       if (continuous_dump_config_ != NULL) continuous_dump_config_->::perfetto::protos::HeapprofdConfig_ContinuousDumpConfig::Clear();
     }
   }
-  ZR_(no_startup_, idle_allocations_);
+  ZR_(no_startup_, dump_at_max_);
 
 #undef ZR_HELPER_
 #undef ZR_
@@ -38299,6 +39550,21 @@ bool HeapprofdConfig::MergePartialFromCodedStream(
         } else {
           goto handle_unusual;
         }
+        if (input->ExpectTag(104)) goto parse_dump_at_max;
+        break;
+      }
+
+      // optional bool dump_at_max = 13;
+      case 13: {
+        if (tag == 104) {
+         parse_dump_at_max:
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
+                   bool, ::google::protobuf::internal::WireFormatLite::TYPE_BOOL>(
+                 input, &dump_at_max_)));
+          set_has_dump_at_max();
+        } else {
+          goto handle_unusual;
+        }
         if (input->ExpectAtEnd()) goto success;
         break;
       }
@@ -38387,6 +39653,11 @@ void HeapprofdConfig::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::WriteBool(12, this->idle_allocations(), output);
   }
 
+  // optional bool dump_at_max = 13;
+  if (has_dump_at_max()) {
+    ::google::protobuf::internal::WireFormatLite::WriteBool(13, this->dump_at_max(), output);
+  }
+
   output->WriteRaw(unknown_fields().data(),
                    static_cast<int>(unknown_fields().size()));
   // @@protoc_insertion_point(serialize_end:perfetto.protos.HeapprofdConfig)
@@ -38429,7 +39700,7 @@ int HeapprofdConfig::ByteSize() const {
     }
 
   }
-  if (_has_bits_[8 / 32] & 1792u) {
+  if (_has_bits_[8 / 32] & 3840u) {
     // optional bool no_startup = 10;
     if (has_no_startup()) {
       total_size += 1 + 1;
@@ -38442,6 +39713,11 @@ int HeapprofdConfig::ByteSize() const {
 
     // optional bool idle_allocations = 12;
     if (has_idle_allocations()) {
+      total_size += 1 + 1;
+    }
+
+    // optional bool dump_at_max = 13;
+    if (has_dump_at_max()) {
       total_size += 1 + 1;
     }
 
@@ -38516,6 +39792,9 @@ void HeapprofdConfig::MergeFrom(const HeapprofdConfig& from) {
     if (from.has_idle_allocations()) {
       set_idle_allocations(from.idle_allocations());
     }
+    if (from.has_dump_at_max()) {
+      set_dump_at_max(from.dump_at_max());
+    }
   }
   if (!from.unknown_fields().empty()) {
     mutable_unknown_fields()->append(from.unknown_fields());
@@ -38550,6 +39829,7 @@ void HeapprofdConfig::InternalSwap(HeapprofdConfig* other) {
   std::swap(no_startup_, other->no_startup_);
   std::swap(no_running_, other->no_running_);
   std::swap(idle_allocations_, other->idle_allocations_);
+  std::swap(dump_at_max_, other->dump_at_max_);
   std::swap(_has_bits_[0], other->_has_bits_[0]);
   _unknown_fields_.Swap(&other->_unknown_fields_);
   std::swap(_cached_size_, other->_cached_size_);
@@ -38968,6 +40248,30 @@ void HeapprofdConfig::clear_idle_allocations() {
   set_has_idle_allocations();
   idle_allocations_ = value;
   // @@protoc_insertion_point(field_set:perfetto.protos.HeapprofdConfig.idle_allocations)
+}
+
+// optional bool dump_at_max = 13;
+bool HeapprofdConfig::has_dump_at_max() const {
+  return (_has_bits_[0] & 0x00000800u) != 0;
+}
+void HeapprofdConfig::set_has_dump_at_max() {
+  _has_bits_[0] |= 0x00000800u;
+}
+void HeapprofdConfig::clear_has_dump_at_max() {
+  _has_bits_[0] &= ~0x00000800u;
+}
+void HeapprofdConfig::clear_dump_at_max() {
+  dump_at_max_ = false;
+  clear_has_dump_at_max();
+}
+ bool HeapprofdConfig::dump_at_max() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.HeapprofdConfig.dump_at_max)
+  return dump_at_max_;
+}
+ void HeapprofdConfig::set_dump_at_max(bool value) {
+  set_has_dump_at_max();
+  dump_at_max_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.HeapprofdConfig.dump_at_max)
 }
 
 #endif  // PROTOBUF_INLINE_NOT_IN_HEADERS
@@ -57054,7 +58358,7 @@ bool BufferedFrameDeserializer::EndReceive(size_t recv_size) {
         // The caller is expected to shut down the socket and give up at this
         // point. If it doesn't do that and insists going on at some point it
         // will hit the capacity check in BeginReceive().
-        PERFETTO_DLOG("Frame too large (size %zu)", next_frame_size);
+        PERFETTO_LOG("IPC Frame too large (size %zu)", next_frame_size);
         return false;
       }
       break;
@@ -68759,12 +70063,12 @@ class InitializeConnectionRequest : public ::google::protobuf::MessageLite {
 
   // accessors -------------------------------------------------------
 
-  // optional uint32 shared_buffer_page_size_bytes = 1;
-  bool has_shared_buffer_page_size_bytes() const;
-  void clear_shared_buffer_page_size_bytes();
-  static const int kSharedBufferPageSizeBytesFieldNumber = 1;
-  ::google::protobuf::uint32 shared_buffer_page_size_bytes() const;
-  void set_shared_buffer_page_size_bytes(::google::protobuf::uint32 value);
+  // optional uint32 shared_memory_page_size_hint_bytes = 1;
+  bool has_shared_memory_page_size_hint_bytes() const;
+  void clear_shared_memory_page_size_hint_bytes();
+  static const int kSharedMemoryPageSizeHintBytesFieldNumber = 1;
+  ::google::protobuf::uint32 shared_memory_page_size_hint_bytes() const;
+  void set_shared_memory_page_size_hint_bytes(::google::protobuf::uint32 value);
 
   // optional uint32 shared_memory_size_hint_bytes = 2;
   bool has_shared_memory_size_hint_bytes() const;
@@ -68794,8 +70098,8 @@ class InitializeConnectionRequest : public ::google::protobuf::MessageLite {
 
   // @@protoc_insertion_point(class_scope:perfetto.protos.InitializeConnectionRequest)
  private:
-  inline void set_has_shared_buffer_page_size_bytes();
-  inline void clear_has_shared_buffer_page_size_bytes();
+  inline void set_has_shared_memory_page_size_hint_bytes();
+  inline void clear_has_shared_memory_page_size_hint_bytes();
   inline void set_has_shared_memory_size_hint_bytes();
   inline void clear_has_shared_memory_size_hint_bytes();
   inline void set_has_producer_name();
@@ -68808,7 +70112,7 @@ class InitializeConnectionRequest : public ::google::protobuf::MessageLite {
 
   ::google::protobuf::uint32 _has_bits_[1];
   mutable int _cached_size_;
-  ::google::protobuf::uint32 shared_buffer_page_size_bytes_;
+  ::google::protobuf::uint32 shared_memory_page_size_hint_bytes_;
   ::google::protobuf::uint32 shared_memory_size_hint_bytes_;
   ::google::protobuf::internal::ArenaStringPtr producer_name_;
   int smb_scraping_mode_;
@@ -71413,28 +72717,28 @@ class GetAsyncCommandResponse : public ::google::protobuf::MessageLite {
 #if !PROTOBUF_INLINE_NOT_IN_HEADERS
 // InitializeConnectionRequest
 
-// optional uint32 shared_buffer_page_size_bytes = 1;
-inline bool InitializeConnectionRequest::has_shared_buffer_page_size_bytes() const {
+// optional uint32 shared_memory_page_size_hint_bytes = 1;
+inline bool InitializeConnectionRequest::has_shared_memory_page_size_hint_bytes() const {
   return (_has_bits_[0] & 0x00000001u) != 0;
 }
-inline void InitializeConnectionRequest::set_has_shared_buffer_page_size_bytes() {
+inline void InitializeConnectionRequest::set_has_shared_memory_page_size_hint_bytes() {
   _has_bits_[0] |= 0x00000001u;
 }
-inline void InitializeConnectionRequest::clear_has_shared_buffer_page_size_bytes() {
+inline void InitializeConnectionRequest::clear_has_shared_memory_page_size_hint_bytes() {
   _has_bits_[0] &= ~0x00000001u;
 }
-inline void InitializeConnectionRequest::clear_shared_buffer_page_size_bytes() {
-  shared_buffer_page_size_bytes_ = 0u;
-  clear_has_shared_buffer_page_size_bytes();
+inline void InitializeConnectionRequest::clear_shared_memory_page_size_hint_bytes() {
+  shared_memory_page_size_hint_bytes_ = 0u;
+  clear_has_shared_memory_page_size_hint_bytes();
 }
-inline ::google::protobuf::uint32 InitializeConnectionRequest::shared_buffer_page_size_bytes() const {
-  // @@protoc_insertion_point(field_get:perfetto.protos.InitializeConnectionRequest.shared_buffer_page_size_bytes)
-  return shared_buffer_page_size_bytes_;
+inline ::google::protobuf::uint32 InitializeConnectionRequest::shared_memory_page_size_hint_bytes() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.InitializeConnectionRequest.shared_memory_page_size_hint_bytes)
+  return shared_memory_page_size_hint_bytes_;
 }
-inline void InitializeConnectionRequest::set_shared_buffer_page_size_bytes(::google::protobuf::uint32 value) {
-  set_has_shared_buffer_page_size_bytes();
-  shared_buffer_page_size_bytes_ = value;
-  // @@protoc_insertion_point(field_set:perfetto.protos.InitializeConnectionRequest.shared_buffer_page_size_bytes)
+inline void InitializeConnectionRequest::set_shared_memory_page_size_hint_bytes(::google::protobuf::uint32 value) {
+  set_has_shared_memory_page_size_hint_bytes();
+  shared_memory_page_size_hint_bytes_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.InitializeConnectionRequest.shared_memory_page_size_hint_bytes)
 }
 
 // optional uint32 shared_memory_size_hint_bytes = 2;
@@ -72775,7 +74079,7 @@ const InitializeConnectionRequest_ProducerSMBScrapingMode InitializeConnectionRe
 const int InitializeConnectionRequest::ProducerSMBScrapingMode_ARRAYSIZE;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 #if !defined(_MSC_VER) || _MSC_VER >= 1900
-const int InitializeConnectionRequest::kSharedBufferPageSizeBytesFieldNumber;
+const int InitializeConnectionRequest::kSharedMemoryPageSizeHintBytesFieldNumber;
 const int InitializeConnectionRequest::kSharedMemorySizeHintBytesFieldNumber;
 const int InitializeConnectionRequest::kProducerNameFieldNumber;
 const int InitializeConnectionRequest::kSmbScrapingModeFieldNumber;
@@ -72803,7 +74107,7 @@ void InitializeConnectionRequest::SharedCtor() {
   _cached_size_ = 0;
   _unknown_fields_.UnsafeSetDefault(
       &::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  shared_buffer_page_size_bytes_ = 0u;
+  shared_memory_page_size_hint_bytes_ = 0u;
   shared_memory_size_hint_bytes_ = 0u;
   producer_name_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
   smb_scraping_mode_ = 0;
@@ -72870,7 +74174,7 @@ void InitializeConnectionRequest::Clear() {
 } while (0)
 
   if (_has_bits_[0 / 32] & 15u) {
-    ZR_(shared_buffer_page_size_bytes_, shared_memory_size_hint_bytes_);
+    ZR_(shared_memory_page_size_hint_bytes_, shared_memory_size_hint_bytes_);
     if (has_producer_name()) {
       producer_name_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
     }
@@ -72900,13 +74204,13 @@ bool InitializeConnectionRequest::MergePartialFromCodedStream(
     tag = p.first;
     if (!p.second) goto handle_unusual;
     switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
-      // optional uint32 shared_buffer_page_size_bytes = 1;
+      // optional uint32 shared_memory_page_size_hint_bytes = 1;
       case 1: {
         if (tag == 8) {
           DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
                    ::google::protobuf::uint32, ::google::protobuf::internal::WireFormatLite::TYPE_UINT32>(
-                 input, &shared_buffer_page_size_bytes_)));
-          set_has_shared_buffer_page_size_bytes();
+                 input, &shared_memory_page_size_hint_bytes_)));
+          set_has_shared_memory_page_size_hint_bytes();
         } else {
           goto handle_unusual;
         }
@@ -72988,9 +74292,9 @@ failure:
 void InitializeConnectionRequest::SerializeWithCachedSizes(
     ::google::protobuf::io::CodedOutputStream* output) const {
   // @@protoc_insertion_point(serialize_start:perfetto.protos.InitializeConnectionRequest)
-  // optional uint32 shared_buffer_page_size_bytes = 1;
-  if (has_shared_buffer_page_size_bytes()) {
-    ::google::protobuf::internal::WireFormatLite::WriteUInt32(1, this->shared_buffer_page_size_bytes(), output);
+  // optional uint32 shared_memory_page_size_hint_bytes = 1;
+  if (has_shared_memory_page_size_hint_bytes()) {
+    ::google::protobuf::internal::WireFormatLite::WriteUInt32(1, this->shared_memory_page_size_hint_bytes(), output);
   }
 
   // optional uint32 shared_memory_size_hint_bytes = 2;
@@ -73020,11 +74324,11 @@ int InitializeConnectionRequest::ByteSize() const {
   int total_size = 0;
 
   if (_has_bits_[0 / 32] & 15u) {
-    // optional uint32 shared_buffer_page_size_bytes = 1;
-    if (has_shared_buffer_page_size_bytes()) {
+    // optional uint32 shared_memory_page_size_hint_bytes = 1;
+    if (has_shared_memory_page_size_hint_bytes()) {
       total_size += 1 +
         ::google::protobuf::internal::WireFormatLite::UInt32Size(
-          this->shared_buffer_page_size_bytes());
+          this->shared_memory_page_size_hint_bytes());
     }
 
     // optional uint32 shared_memory_size_hint_bytes = 2;
@@ -73065,8 +74369,8 @@ void InitializeConnectionRequest::MergeFrom(const InitializeConnectionRequest& f
 // @@protoc_insertion_point(class_specific_merge_from_start:perfetto.protos.InitializeConnectionRequest)
   if (GOOGLE_PREDICT_FALSE(&from == this)) producer_port_pb_MergeFromFail(__LINE__);
   if (from._has_bits_[0 / 32] & (0xffu << (0 % 32))) {
-    if (from.has_shared_buffer_page_size_bytes()) {
-      set_shared_buffer_page_size_bytes(from.shared_buffer_page_size_bytes());
+    if (from.has_shared_memory_page_size_hint_bytes()) {
+      set_shared_memory_page_size_hint_bytes(from.shared_memory_page_size_hint_bytes());
     }
     if (from.has_shared_memory_size_hint_bytes()) {
       set_shared_memory_size_hint_bytes(from.shared_memory_size_hint_bytes());
@@ -73101,7 +74405,7 @@ void InitializeConnectionRequest::Swap(InitializeConnectionRequest* other) {
   InternalSwap(other);
 }
 void InitializeConnectionRequest::InternalSwap(InitializeConnectionRequest* other) {
-  std::swap(shared_buffer_page_size_bytes_, other->shared_buffer_page_size_bytes_);
+  std::swap(shared_memory_page_size_hint_bytes_, other->shared_memory_page_size_hint_bytes_);
   std::swap(shared_memory_size_hint_bytes_, other->shared_memory_size_hint_bytes_);
   producer_name_.Swap(&other->producer_name_);
   std::swap(smb_scraping_mode_, other->smb_scraping_mode_);
@@ -73117,28 +74421,28 @@ void InitializeConnectionRequest::InternalSwap(InitializeConnectionRequest* othe
 #if PROTOBUF_INLINE_NOT_IN_HEADERS
 // InitializeConnectionRequest
 
-// optional uint32 shared_buffer_page_size_bytes = 1;
-bool InitializeConnectionRequest::has_shared_buffer_page_size_bytes() const {
+// optional uint32 shared_memory_page_size_hint_bytes = 1;
+bool InitializeConnectionRequest::has_shared_memory_page_size_hint_bytes() const {
   return (_has_bits_[0] & 0x00000001u) != 0;
 }
-void InitializeConnectionRequest::set_has_shared_buffer_page_size_bytes() {
+void InitializeConnectionRequest::set_has_shared_memory_page_size_hint_bytes() {
   _has_bits_[0] |= 0x00000001u;
 }
-void InitializeConnectionRequest::clear_has_shared_buffer_page_size_bytes() {
+void InitializeConnectionRequest::clear_has_shared_memory_page_size_hint_bytes() {
   _has_bits_[0] &= ~0x00000001u;
 }
-void InitializeConnectionRequest::clear_shared_buffer_page_size_bytes() {
-  shared_buffer_page_size_bytes_ = 0u;
-  clear_has_shared_buffer_page_size_bytes();
+void InitializeConnectionRequest::clear_shared_memory_page_size_hint_bytes() {
+  shared_memory_page_size_hint_bytes_ = 0u;
+  clear_has_shared_memory_page_size_hint_bytes();
 }
- ::google::protobuf::uint32 InitializeConnectionRequest::shared_buffer_page_size_bytes() const {
-  // @@protoc_insertion_point(field_get:perfetto.protos.InitializeConnectionRequest.shared_buffer_page_size_bytes)
-  return shared_buffer_page_size_bytes_;
+ ::google::protobuf::uint32 InitializeConnectionRequest::shared_memory_page_size_hint_bytes() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.InitializeConnectionRequest.shared_memory_page_size_hint_bytes)
+  return shared_memory_page_size_hint_bytes_;
 }
- void InitializeConnectionRequest::set_shared_buffer_page_size_bytes(::google::protobuf::uint32 value) {
-  set_has_shared_buffer_page_size_bytes();
-  shared_buffer_page_size_bytes_ = value;
-  // @@protoc_insertion_point(field_set:perfetto.protos.InitializeConnectionRequest.shared_buffer_page_size_bytes)
+ void InitializeConnectionRequest::set_shared_memory_page_size_hint_bytes(::google::protobuf::uint32 value) {
+  set_has_shared_memory_page_size_hint_bytes();
+  shared_memory_page_size_hint_bytes_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.InitializeConnectionRequest.shared_memory_page_size_hint_bytes)
 }
 
 // optional uint32 shared_memory_size_hint_bytes = 2;
@@ -86692,18 +87996,18 @@ class PERFETTO_EXPORT TraceWriter : public TraceWriterBase {
 
   // Commits the data pending for the current chunk into the shared memory
   // buffer and sends a CommitDataRequest() to the service. This can be called
-  // only if handle returned by NewTracePacket() has been destroyed (i.e. we
+  // only if the handle returned by NewTracePacket() has been destroyed (i.e. we
   // cannot Flush() while writing a TracePacket).
   // Note: Flush() also happens implicitly when destroying the TraceWriter.
   // |callback| is an optional callback. When non-null it will request the
   // service to ACK the flush and will be invoked after the service has
-  // ackwnoledged it. Please note that the callback might be NEVER INVOKED, for
-  // instance if the service crashes or the IPC connection is dropped. The
-  // callback should be used only by tests and best-effort features (logging).
+  // acknowledged it. The callback might be NEVER INVOKED if the service crashes
+  // or the IPC connection is dropped. The callback should be used only by tests
+  // and best-effort features (logging).
   // TODO(primiano): right now the |callback| will be called on the IPC thread.
   // This is fine in the current single-thread scenario, but long-term
   // trace_writer_impl.cc should be smarter and post it on the right thread.
-  virtual void Flush(std::function<void()> callback = {}) = 0;
+  void Flush(std::function<void()> callback = {}) override = 0;
 
   virtual WriterID writer_id() const = 0;
 
@@ -87894,6 +89198,7 @@ bool PacketStreamValidator::Validate(const Slices& slices) {
 #include <utility>
 
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
+// gen_amalgamated expanded: #include "perfetto/protozero/proto_utils.h"
 
 namespace perfetto {
 
@@ -88019,6 +89324,12 @@ class SharedMemoryABI {
   // Each TracePacket in the Chunk is prefixed by a 4 bytes redundant VarInt
   // (see proto_utils.h) stating its size.
   static constexpr size_t kPacketHeaderSize = 4;
+
+  // TraceWriter specifies this invalid packet/fragment size to signal to the
+  // service that a packet should be discarded, because the TraceWriter couldn't
+  // write its remaining fragments (e.g. because the SMB was exhausted).
+  static constexpr size_t kPacketSizeDropPacket =
+      protozero::proto_utils::kMaxMessageLength;
 
   // Chunk states and transitions:
   //    kChunkFree  <----------------+
@@ -88521,6 +89832,7 @@ constexpr uint32_t SharedMemoryABI::kNumChunksForLayout[];
 constexpr const char* SharedMemoryABI::kChunkStateStr[];
 constexpr const size_t SharedMemoryABI::kInvalidPageIdx;
 constexpr const size_t SharedMemoryABI::kMaxPageSize;
+constexpr const size_t SharedMemoryABI::kPacketSizeDropPacket;
 
 SharedMemoryABI::SharedMemoryABI() = default;
 
@@ -89097,9 +90409,10 @@ class PERFETTO_EXPORT TracingService {
   // to destroy the Producer once the Producer::OnDisconnect() has been invoked.
   // |uid| is the trusted user id of the producer process, used by the consumers
   // for validating the origin of trace data.
-  // |shared_memory_size_hint_bytes| is an optional hint on the size of the
-  // shared memory buffer. The service can ignore the hint (e.g., if the hint
-  // is unreasonably large).
+  // |shared_memory_size_hint_bytes| and |shared_memory_page_size_hint_bytes|
+  // are optional hints on the size of the shared memory buffer and its pages.
+  // The service can ignore the hints (e.g., if the hints are unreasonably
+  // large or other sizes were configured in a tracing session's config).
   // |in_process| enables the ProducerEndpoint to manage its own shared memory
   // and enables use of |ProducerEndpoint::CreateTraceWriter|.
   // Can return null in the unlikely event that service has too many producers
@@ -89111,7 +90424,8 @@ class PERFETTO_EXPORT TracingService {
       size_t shared_memory_size_hint_bytes = 0,
       bool in_process = false,
       ProducerSMBScrapingMode smb_scraping_mode =
-          ProducerSMBScrapingMode::kDefault) = 0;
+          ProducerSMBScrapingMode::kDefault,
+      size_t shared_memory_page_size_hint_bytes = 0) = 0;
 
   // Connects a Consumer instance and obtains a ConsumerEndpoint, which is
   // essentially a 1:1 channel between one Consumer and the Service.
@@ -89181,6 +90495,26 @@ class TraceWriter;
 // from the SharedMemory it receives from the Service-side.
 class PERFETTO_EXPORT SharedMemoryArbiter {
  public:
+  // Determines how GetNewChunk() behaves when no free chunks are available.
+  enum class BufferExhaustedPolicy {
+    // SharedMemoryArbiterImpl::GetNewChunk() will stall if no free SMB chunk is
+    // available and wait for the tracing service to free one. Note that this
+    // requires that messages the arbiter sends to the tracing service (from any
+    // TraceWriter thread) will be received by it, even if all TraceWriter
+    // threads are stalled.
+    kStall,
+
+    // SharedMemoryArbiterImpl::GetNewChunk() will return an invalid chunk if no
+    // free SMB chunk is available. In this case, the TraceWriter will fall back
+    // to a garbage chunk and drop written data until acquiring a future chunk
+    // succeeds again.
+    kDrop,
+
+    // TODO(eseckler): Switch to kDrop by default and change the Android code to
+    // explicitly request kStall instead.
+    kDefault = kStall
+  };
+
   virtual ~SharedMemoryArbiter();
 
   // Creates a new TraceWriter and assigns it a new WriterID. The WriterID is
@@ -89188,7 +90522,9 @@ class PERFETTO_EXPORT SharedMemoryArbiter {
   // the Service to reconstruct TracePackets written by the same TraceWriter.
   // Returns null impl of TraceWriter if all WriterID slots are exhausted.
   virtual std::unique_ptr<TraceWriter> CreateTraceWriter(
-      BufferID target_buffer) = 0;
+      BufferID target_buffer,
+      BufferExhaustedPolicy buffer_exhausted_policy =
+          BufferExhaustedPolicy::kDefault) = 0;
 
   // Binds the provided unbound StartupTraceWriterRegistry to the arbiter's SMB.
   // Normally this happens when the perfetto service has been initialized and we
@@ -89199,6 +90535,10 @@ class PERFETTO_EXPORT SharedMemoryArbiter {
   // they are concurrently being written to or if this method isn't called on
   // the arbiter's TaskRunner. The registry will retry on the arbiter's
   // TaskRunner until all writers were bound successfully.
+  //
+  // The commit of the StartupTraceWriters' locally buffered data to the SMB is
+  // rate limited to avoid exhausting the SMB, and may continue asynchronously
+  // even after all writers were bound.
   //
   // By calling this method, the registry's ownership is transferred to the
   // arbiter. The arbiter will delete the registry once all writers were bound.
@@ -89213,7 +90553,15 @@ class PERFETTO_EXPORT SharedMemoryArbiter {
   // committed in the shared memory buffer.
   virtual void NotifyFlushComplete(FlushRequestID) = 0;
 
-  // Implemented in src/core/shared_memory_arbiter_impl.cc .
+  // Implemented in src/core/shared_memory_arbiter_impl.cc.
+  // Args:
+  // |SharedMemory|: the shared memory buffer to use.
+  // |page_size|: a multiple of 4KB that defines the granularity of tracing
+  // pages. See tradeoff considerations in shared_memory_abi.h.
+  // |ProducerEndpoint|: The service's producer endpoint used e.g. to commit
+  // chunks and register trace writers.
+  // |TaskRunner|: Task runner for perfetto's main thread, which executes the
+  // OnPagesCompleteCallback and IPC calls to the |ProducerEndpoint|.
   static std::unique_ptr<SharedMemoryArbiter> CreateInstance(
       SharedMemory*,
       size_t page_size,
@@ -89247,12 +90595,12 @@ class PERFETTO_EXPORT SharedMemoryArbiter {
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <vector>
 
 // gen_amalgamated expanded: #include "perfetto/base/export.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/weak_ptr.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_arbiter.h"
 
 namespace perfetto {
 
@@ -89300,7 +90648,9 @@ class PERFETTO_EXPORT StartupTraceWriterRegistry {
   // unbound. Usually called on a writer thread. The writer should never be
   // destroyed by the caller directly, but instead returned to the registry by
   // calling StartupTraceWriter::ReturnToRegistry.
-  std::unique_ptr<StartupTraceWriter> CreateUnboundTraceWriter();
+  std::unique_ptr<StartupTraceWriter> CreateUnboundTraceWriter(
+      SharedMemoryArbiter::BufferExhaustedPolicy =
+          SharedMemoryArbiter::BufferExhaustedPolicy::kDefault);
 
   // Binds all StartupTraceWriters created by this registry to the given arbiter
   // and target buffer. Should only be called once and on the passed
@@ -89313,6 +90663,10 @@ class PERFETTO_EXPORT StartupTraceWriterRegistry {
   //
   // Calls |on_bound_callback| asynchronously on the passed TaskRunner once all
   // writers were bound.
+  //
+  // The commit of the StartupTraceWriters' locally buffered data to the SMB is
+  // rate limited to avoid exhausting the SMB, and may continue asynchronously
+  // even after |on_bound_callback| was called.
   void BindToArbiter(
       SharedMemoryArbiterImpl*,
       BufferID target_buffer,
@@ -89345,7 +90699,7 @@ class PERFETTO_EXPORT StartupTraceWriterRegistry {
 
   // Unbound writers that we handed out to writer threads. These writers may be
   // concurrently written to by the writer threads.
-  std::set<StartupTraceWriter*> unbound_writers_;
+  std::vector<StartupTraceWriter*> unbound_writers_;
 
   // Unbound writers that writer threads returned to the registry by calling
   // ReturnUnboundTraceWriter(). Writers are removed from |unbound_writers_|
@@ -89356,6 +90710,7 @@ class PERFETTO_EXPORT StartupTraceWriterRegistry {
   SharedMemoryArbiterImpl* arbiter_ = nullptr;  // |nullptr| while unbound.
   BufferID target_buffer_ = 0;
   base::TaskRunner* task_runner_;
+  size_t chunks_per_batch_ = 0;
   std::function<void(StartupTraceWriterRegistry*)> on_bound_callback_ = nullptr;
 
   // Keep at the end. Initialized during |BindToArbiter()|, like |task_runner_|.
@@ -89420,26 +90775,19 @@ class TaskRunner;
 // current thread-local chunk.
 class SharedMemoryArbiterImpl : public SharedMemoryArbiter {
  public:
-  // Args:
-  // |start|,|size|: boundaries of the shared memory buffer.
-  // |page_size|: a multiple of 4KB that defines the granularity of tracing
-  // pages. See tradeoff considerations in shared_memory_abi.h.
-  // |OnPagesCompleteCallback|: a callback that will be posted on the passed
-  // |TaskRunner| when one or more pages are complete (and hence the Producer
-  // should send a CommitData request to the Service).
-  // |TaskRunner|: Task runner for perfetto's main thread, which executes the
-  // OnPagesCompleteCallback and IPC calls to the |ProducerEndpoint|.
+  // See SharedMemoryArbiter::CreateInstance(). |start|, |size| define the
+  // boundaries of the shared memory buffer.
   SharedMemoryArbiterImpl(void* start,
                           size_t size,
                           size_t page_size,
                           TracingService::ProducerEndpoint*,
                           base::TaskRunner*);
 
-  // Returns a new Chunk to write tracing data. The call always returns a valid
-  // Chunk. TODO(primiano): right now this blocks if there are no free chunks
-  // in the SMB. In the long term the caller should be allowed to pick a policy
-  // and handle the retry itself asynchronously.
+  // Returns a new Chunk to write tracing data. Depending on the provided
+  // BufferExhaustedPolicy, this may return an invalid chunk if no valid free
+  // chunk could be found in the SMB.
   SharedMemoryABI::Chunk GetNewChunk(const SharedMemoryABI::ChunkHeader&,
+                                     BufferExhaustedPolicy,
                                      size_t size_hint = 0);
 
   // Puts back a Chunk that has been completed and sends a request to the
@@ -89474,12 +90822,21 @@ class SharedMemoryArbiterImpl : public SharedMemoryArbiter {
   // SharedMemoryArbiter implementation.
   // See include/perfetto/tracing/core/shared_memory_arbiter.h for comments.
   std::unique_ptr<TraceWriter> CreateTraceWriter(
-      BufferID target_buffer) override;
+      BufferID target_buffer,
+      BufferExhaustedPolicy = BufferExhaustedPolicy::kDefault) override;
   void BindStartupTraceWriterRegistry(
       std::unique_ptr<StartupTraceWriterRegistry>,
       BufferID target_buffer) override;
 
   void NotifyFlushComplete(FlushRequestID) override;
+
+  base::TaskRunner* task_runner() const { return task_runner_; }
+  size_t page_size() const { return shmem_abi_.page_size(); }
+  size_t num_pages() const { return shmem_abi_.num_pages(); }
+
+  base::WeakPtr<SharedMemoryArbiterImpl> GetWeakPtr() const {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  private:
   friend class TraceWriterImpl;
@@ -89652,8 +91009,10 @@ class PatchList {
 
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_abi.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_arbiter.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_writer.h"
 // gen_amalgamated expanded: #include "perfetto/protozero/message_handle.h"
+// gen_amalgamated expanded: #include "perfetto/protozero/proto_utils.h"
 // gen_amalgamated expanded: #include "perfetto/protozero/scattered_stream_writer.h"
 // gen_amalgamated expanded: #include "src/tracing/core/patch_list.h"
 
@@ -89666,7 +91025,10 @@ class TraceWriterImpl : public TraceWriter,
                         public protozero::ScatteredStreamWriter::Delegate {
  public:
   // TracePacketHandle is defined in trace_writer.h
-  TraceWriterImpl(SharedMemoryArbiterImpl*, WriterID, BufferID);
+  TraceWriterImpl(SharedMemoryArbiterImpl*,
+                  WriterID,
+                  BufferID,
+                  SharedMemoryArbiter::BufferExhaustedPolicy);
   ~TraceWriterImpl() override;
 
   // TraceWriter implementation. See documentation in trace_writer.h.
@@ -89679,6 +91041,7 @@ class TraceWriterImpl : public TraceWriter,
   }
 
   void ResetChunkForTesting() { cur_chunk_ = SharedMemoryABI::Chunk(); }
+  bool drop_packets_for_testing() const { return drop_packets_; }
 
  private:
   TraceWriterImpl(const TraceWriterImpl&) = delete;
@@ -89697,6 +91060,10 @@ class TraceWriterImpl : public TraceWriter,
   // This is just copied back into the chunk header.
   // See comments in data_source_config.proto for |target_buffer|.
   const BufferID target_buffer_;
+
+  // Whether GetNewChunk() should stall or return an invalid chunk if the SMB is
+  // exhausted.
+  const SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy_;
 
   // Monotonic (% wrapping) sequence id of the chunk. Together with the WriterID
   // this allows the Service to reconstruct the linear sequence of packets.
@@ -89727,6 +91094,16 @@ class TraceWriterImpl : public TraceWriter,
   // a chunk can contain. When this is |true|, the next packet requires starting
   // a new chunk.
   bool reached_max_packets_per_chunk_ = false;
+
+  // If we fail to acquire a new chunk when the arbiter operates in
+  // SharedMemory::BufferExhaustedPolicy::kDrop mode, the trace writer enters a
+  // mode in which data is written to a local garbage chunk and dropped.
+  bool drop_packets_ = false;
+
+  // Whether the trace writer should try to acquire a new chunk from the SMB
+  // when the next TracePacket is started because it filled the garbage chunk at
+  // least once since the last attempt.
+  bool retry_new_chunk_after_packet_ = false;
 
   // When a packet is fragmented across different chunks, the |size_field| of
   // the outstanding nested protobuf messages is redirected onto Patch entries
@@ -89803,6 +91180,7 @@ SharedMemoryArbiterImpl::SharedMemoryArbiterImpl(
 
 Chunk SharedMemoryArbiterImpl::GetNewChunk(
     const SharedMemoryABI::ChunkHeader& header,
+    BufferExhaustedPolicy buffer_exhausted_policy,
     size_t size_hint) {
   PERFETTO_DCHECK(size_hint == 0);  // Not implemented yet.
   int stall_count = 0;
@@ -89855,11 +91233,15 @@ Chunk SharedMemoryArbiterImpl::GetNewChunk(
       }
     }  // std::lock_guard<std::mutex>
 
+    if (buffer_exhausted_policy == BufferExhaustedPolicy::kDrop) {
+      PERFETTO_DLOG("Shared memory buffer exhaused, returning invalid Chunk!");
+      return Chunk();
+    }
+
     // All chunks are taken (either kBeingWritten by us or kBeingRead by the
-    // Service). TODO: at this point we should return a bankrupcy chunk, not
-    // crash the process.
+    // Service).
     if (stall_count++ == kLogAfterNStalls) {
-      PERFETTO_ELOG("Shared memory buffer overrun! Stalling");
+      PERFETTO_LOG("Shared memory buffer overrun! Stalling");
     }
 
     if (stall_count == kAssertAtNStalls) {
@@ -90043,7 +91425,8 @@ void SharedMemoryArbiterImpl::FlushPendingCommitDataRequests(
 }
 
 std::unique_ptr<TraceWriter> SharedMemoryArbiterImpl::CreateTraceWriter(
-    BufferID target_buffer) {
+    BufferID target_buffer,
+    BufferExhaustedPolicy buffer_exhausted_policy) {
   WriterID id;
   {
     std::lock_guard<std::mutex> scoped_lock(lock_);
@@ -90057,7 +91440,7 @@ std::unique_ptr<TraceWriter> SharedMemoryArbiterImpl::CreateTraceWriter(
       weak_this->producer_endpoint_->RegisterTraceWriter(id, target_buffer);
   });
   return std::unique_ptr<TraceWriter>(
-      new TraceWriterImpl(this, id, target_buffer));
+      new TraceWriterImpl(this, id, target_buffer, buffer_exhausted_policy));
 }
 
 void SharedMemoryArbiterImpl::BindStartupTraceWriterRegistry(
@@ -91183,6 +92566,8 @@ struct hash<perfetto::base::Optional<T>> {
 // gen_amalgamated expanded: #include "perfetto/ext/base/optional.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_abi.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_arbiter.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_writer.h"
 // gen_amalgamated expanded: #include "perfetto/protozero/message_handle.h"
 // gen_amalgamated expanded: #include "perfetto/protozero/scattered_heap_buffer.h"
@@ -91279,7 +92664,8 @@ class PERFETTO_EXPORT StartupTraceWriter
   // Create an unbound StartupTraceWriter associated with the registry pointed
   // to by the handle. The writer can later be bound by calling
   // BindToTraceWriter(). The registry handle may be nullptr in tests.
-  StartupTraceWriter(std::shared_ptr<StartupTraceWriterRegistryHandle>);
+  StartupTraceWriter(std::shared_ptr<StartupTraceWriterRegistryHandle>,
+                     SharedMemoryArbiter::BufferExhaustedPolicy);
 
   StartupTraceWriter(const StartupTraceWriter&) = delete;
   StartupTraceWriter& operator=(const StartupTraceWriter&) = delete;
@@ -91287,22 +92673,31 @@ class PERFETTO_EXPORT StartupTraceWriter
   // Bind this StartupTraceWriter to the provided SharedMemoryArbiterImpl.
   // Called by StartupTraceWriterRegistry::BindToArbiter().
   //
-  // This method can be called on any thread. If any data was written locally
-  // before the writer was bound, BindToArbiter() will copy this data into
-  // chunks in the provided target buffer via the SMB. Any future packets will
-  // be directly written into the SMB via a newly obtained TraceWriter from the
-  // arbiter.
+  // This method should be called on the arbiter's task runner. If any data was
+  // written locally before the writer was bound, BindToArbiter() will copy this
+  // data into chunks in the provided target buffer via the SMB. The commit of
+  // this data to the SMB is rate limited to avoid exhausting the SMB
+  // (|chunks_per_batch|), and may continue asynchronously on the arbiter's task
+  // runner even if binding was successful, provided the SharedMemoryArbiterImpl
+  // is not destroyed. Passing value 0 for |chunks_per_batch| disables rate
+  // limiting. Any future packets will be directly written into the SMB via a
+  // newly obtained TraceWriter from the arbiter.
   //
   // Will fail and return |false| if a concurrent write is in progress. Returns
   // |true| if successfully bound and should then not be called again.
   bool BindToArbiter(SharedMemoryArbiterImpl*,
-                     BufferID target_buffer) PERFETTO_WARN_UNUSED_RESULT;
+                     BufferID target_buffer,
+                     size_t chunks_per_batch) PERFETTO_WARN_UNUSED_RESULT;
 
   // protozero::MessageHandleBase::FinalizationListener implementation.
   void OnMessageFinalized(protozero::Message* message) override;
 
   void OnTracePacketCompleted();
-  ChunkID CommitLocalBufferChunks(SharedMemoryArbiterImpl*, WriterID, BufferID);
+  ChunkID CommitLocalBufferChunks(SharedMemoryArbiterImpl*,
+                                  WriterID,
+                                  BufferID,
+                                  size_t chunks_per_batch,
+                                  SharedMemoryABI::Chunk first_chunk);
 
   PERFETTO_THREAD_CHECKER(writer_thread_checker_)
 
@@ -91314,6 +92709,9 @@ class PERFETTO_EXPORT StartupTraceWriter
   // check on later calls to NewTracePacket().
   bool was_bound_ = false;
 
+  const SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy_ =
+      SharedMemoryArbiter::BufferExhaustedPolicy::kDefault;
+
   // All variables below this point are protected by |lock_|.
   std::mutex lock_;
 
@@ -91324,7 +92722,7 @@ class PERFETTO_EXPORT StartupTraceWriter
   std::unique_ptr<protozero::ScatteredHeapBuffer> memory_buffer_;
   std::unique_ptr<protozero::ScatteredStreamWriter> memory_stream_writer_;
 
-  std::vector<uint32_t> packet_sizes_;
+  std::unique_ptr<std::vector<uint32_t>> packet_sizes_;
 
   // Whether the writer thread is currently writing a TracePacket.
   bool write_in_progress_ = false;
@@ -91359,23 +92757,29 @@ class PERFETTO_EXPORT StartupTraceWriter
 #include <numeric>
 
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
-// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_abi.h"
+// gen_amalgamated expanded: #include "perfetto/base/task_runner.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/metatrace.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/startup_trace_writer_registry.h"
 // gen_amalgamated expanded: #include "perfetto/protozero/proto_utils.h"
 // gen_amalgamated expanded: #include "perfetto/trace/trace_packet.pbzero.h"
 // gen_amalgamated expanded: #include "src/tracing/core/patch_list.h"
 // gen_amalgamated expanded: #include "src/tracing/core/shared_memory_arbiter_impl.h"
 
+using PageHeader = perfetto::SharedMemoryABI::PageHeader;
 using ChunkHeader = perfetto::SharedMemoryABI::ChunkHeader;
 
 namespace perfetto {
 
 namespace {
 
-SharedMemoryABI::Chunk NewChunk(SharedMemoryArbiterImpl* arbiter,
-                                WriterID writer_id,
-                                ChunkID chunk_id,
-                                bool fragmenting_packet) {
+static constexpr ChunkID kFirstChunkId = 0;
+
+SharedMemoryABI::Chunk NewChunk(
+    SharedMemoryArbiterImpl* arbiter,
+    WriterID writer_id,
+    ChunkID chunk_id,
+    bool fragmenting_packet,
+    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy) {
   ChunkHeader::Packets packets = {};
   if (fragmenting_packet) {
     packets.count = 1;
@@ -91390,13 +92794,15 @@ SharedMemoryABI::Chunk NewChunk(SharedMemoryArbiterImpl* arbiter,
   header.chunk_id.store(chunk_id, std::memory_order_relaxed);
   header.packets.store(packets, std::memory_order_relaxed);
 
-  return arbiter->GetNewChunk(header);
+  return arbiter->GetNewChunk(header, buffer_exhausted_policy);
 }
 
 class LocalBufferReader {
  public:
-  LocalBufferReader(protozero::ScatteredHeapBuffer* buffer)
-      : buffer_slices_(buffer->slices()), cur_slice_(buffer_slices_.begin()) {}
+  LocalBufferReader(std::unique_ptr<protozero::ScatteredHeapBuffer> buffer)
+      : buffer_(std::move(buffer)),
+        buffer_slices_(buffer_->slices()),
+        cur_slice_(buffer_slices_.begin()) {}
 
   size_t ReadBytes(SharedMemoryABI::Chunk* target_chunk,
                    size_t num_bytes,
@@ -91449,6 +92855,7 @@ class LocalBufferReader {
   }
 
  private:
+  std::unique_ptr<protozero::ScatteredHeapBuffer> buffer_;
   const std::vector<protozero::ScatteredHeapBuffer::Slice>& buffer_slices_;
 
   // Iterator pointing to slice in |buffer_slices_| that we're currently reading
@@ -91458,14 +92865,240 @@ class LocalBufferReader {
   size_t cur_slice_offset_ = 0;
 };
 
+// Helper class that takes ownership of a LocalBufferReader its buffer and
+// commits the buffer's data into the assigned SMB in batches. After writing
+// each batch of data, it waits for the service to acknowledge the batch's
+// commit before continuing with the remaining data.
+class LocalBufferCommitter {
+ public:
+  LocalBufferCommitter(
+      std::unique_ptr<LocalBufferReader> local_buffer_reader,
+      std::unique_ptr<std::vector<uint32_t>> packet_sizes,
+      base::WeakPtr<SharedMemoryArbiterImpl> arbiter,
+      WriterID writer_id,
+      BufferID target_buffer,
+      size_t chunks_per_batch,
+      SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy,
+      SharedMemoryABI::Chunk first_chunk)
+      : local_buffer_reader_(std::move(local_buffer_reader)),
+        packet_sizes_(std::move(packet_sizes)),
+        arbiter_(arbiter),
+        // TODO(eseckler): This assumes a fixed page layout of one chunk per
+        // page. If we ever end up supporting dynamic page layouts, we'd have to
+        // make sure that the arbiter gives us full-page chunks.
+        max_payload_size_(arbiter->page_size() - sizeof(PageHeader) -
+                          sizeof(ChunkHeader)),
+        writer_id_(writer_id),
+        target_buffer_(target_buffer),
+        chunks_per_batch_(chunks_per_batch),
+        buffer_exhausted_policy_(buffer_exhausted_policy),
+        cur_chunk_(std::move(first_chunk)) {
+    PERFETTO_DCHECK(cur_chunk_.is_valid());
+    PERFETTO_DCHECK(!packet_sizes_->empty());
+    remaining_packet_size_ = (*packet_sizes_)[packet_idx_];
+  }
+
+  static void CommitRemainingDataInBatches(
+      std::unique_ptr<LocalBufferCommitter> committer) {
+    // Give up and destroy the committer if the arbiter went away.
+    if (!committer->arbiter_)
+      return;
+
+    committer->CommitNextBatch();
+    if (committer->HasMoreDataToCommit()) {
+      // Flush the commit request to the service and wait for its response
+      // before continuing with the next batch.
+      std::shared_ptr<std::unique_ptr<LocalBufferCommitter>> committer_shared(
+          new std::unique_ptr<LocalBufferCommitter>(std::move(committer)));
+
+      (*committer_shared)
+          ->arbiter_->FlushPendingCommitDataRequests([committer_shared]() {
+            std::unique_ptr<LocalBufferCommitter> owned_committer(
+                committer_shared->release());
+            CommitRemainingDataInBatches(std::move(owned_committer));
+          });
+      return;
+    }
+
+    // We should have read all data from the local buffer.
+    PERFETTO_DCHECK(committer->local_buffer_reader_->DidReadAllData());
+    // Last chunk should have completed the last packet.
+    PERFETTO_DCHECK(!committer->fragmenting_packet_);
+
+    committer->arbiter_->FlushPendingCommitDataRequests();
+  }
+
+  size_t GetTotalNumChunksRequired() {
+    // We will write at least one chunk.
+    size_t num_chunks = 1;
+
+    size_t cur_payload_size = 0;
+    uint16_t cur_num_packets = 0;
+    for (size_t packet_idx = 0; packet_idx < packet_sizes_->size();
+         packet_idx++) {
+      uint32_t remaining_packet_size = (*packet_sizes_)[packet_idx];
+      ++cur_num_packets;
+      do {
+        uint32_t fragment_size = static_cast<uint32_t>(
+            std::min(static_cast<size_t>(remaining_packet_size),
+                     max_payload_size_ - cur_payload_size -
+                         SharedMemoryABI::kPacketHeaderSize));
+        cur_payload_size += SharedMemoryABI::kPacketHeaderSize;
+        cur_payload_size += fragment_size;
+        remaining_packet_size -= fragment_size;
+
+        // We need another chunk if we've filled its payload (i.e., cannot fit
+        // another packet's header) or reached the maximum number of packets.
+        bool next_chunk =
+            cur_payload_size >=
+                max_payload_size_ - SharedMemoryABI::kPacketHeaderSize ||
+            cur_num_packets == ChunkHeader::Packets::kMaxCount;
+
+        if (next_chunk) {
+          num_chunks++;
+          bool is_fragmenting = remaining_packet_size > 0;
+          cur_num_packets = is_fragmenting ? 1 : 0;
+          cur_payload_size = 0;
+        }
+      } while (remaining_packet_size > 0);
+    }
+
+    return num_chunks;
+  }
+
+ private:
+  bool HasMoreDataToCommit() const {
+    PERFETTO_DCHECK(packet_idx_ <= packet_sizes_->size());
+    return packet_idx_ < packet_sizes_->size() || remaining_packet_size_ != 0;
+  }
+
+  // Reads (part of) the remaining data from |local_buffer_reader_| and writes
+  // the next batch of chunks into the SMB.
+  void CommitNextBatch() {
+    PERFETTO_METATRACE_SCOPED(TAG_TRACE_WRITER,
+                              TRACE_WRITER_COMMIT_STARTUP_WRITER_BATCH);
+    for (size_t num_chunks = 0;
+         (!chunks_per_batch_ || num_chunks < chunks_per_batch_) &&
+         HasMoreDataToCommit();
+         num_chunks++) {
+      if (!CommitNextChunk()) {
+        // We ran out of SMB space. Send the current batch early and retry later
+        // with the next batch.
+        break;
+      }
+    }
+  }
+
+  bool CommitNextChunk() {
+    PERFETTO_DCHECK(HasMoreDataToCommit());
+
+    // First chunk is acquired before LocalBufferCommitter is created, so we may
+    // already have a valid chunk.
+    if (!cur_chunk_.is_valid()) {
+      cur_chunk_ = NewChunk(arbiter_.get(), writer_id_, next_chunk_id_,
+                            fragmenting_packet_, buffer_exhausted_policy_);
+
+      if (!cur_chunk_.is_valid())
+        return false;
+
+      next_chunk_id_++;
+    }
+
+    // See comment at initialization of |max_payload_size_|.
+    PERFETTO_CHECK(max_payload_size_ == cur_chunk_.payload_size());
+
+    // Iterate over remaining packets, starting at |packet_idx_|. Write as much
+    // data as possible into |chunk| while not exceeding the chunk's payload
+    // size and the maximum number of packets per chunk.
+    size_t cur_payload_size = 0;
+    uint16_t cur_num_packets = 0;
+    PatchList empty_patch_list;
+    PERFETTO_DCHECK(packet_idx_ < packet_sizes_->size());
+    PERFETTO_DCHECK((*packet_sizes_)[packet_idx_] >= remaining_packet_size_ &&
+                    (remaining_packet_size_ || !(*packet_sizes_)[packet_idx_]));
+    while (HasMoreDataToCommit()) {
+      ++cur_num_packets;
+
+      // The packet may not fit completely into the chunk.
+      uint32_t fragment_size = static_cast<uint32_t>(
+          std::min(static_cast<size_t>(remaining_packet_size_),
+                   max_payload_size_ - cur_payload_size -
+                       SharedMemoryABI::kPacketHeaderSize));
+
+      // Write packet header, i.e. the fragment size.
+      protozero::proto_utils::WriteRedundantVarInt(
+          fragment_size, cur_chunk_.payload_begin() + cur_payload_size);
+      cur_payload_size += SharedMemoryABI::kPacketHeaderSize;
+
+      // Copy packet content into the chunk.
+      size_t bytes_read = local_buffer_reader_->ReadBytes(
+          &cur_chunk_, fragment_size, cur_payload_size);
+      PERFETTO_DCHECK(bytes_read == fragment_size);
+
+      cur_payload_size += fragment_size;
+      remaining_packet_size_ -= fragment_size;
+
+      fragmenting_packet_ = remaining_packet_size_ > 0;
+      if (!fragmenting_packet_) {
+        ++packet_idx_;
+        if (packet_idx_ < packet_sizes_->size()) {
+          remaining_packet_size_ = (*packet_sizes_)[packet_idx_];
+        }
+      }
+
+      // We should return the current chunk if we've filled its payload, reached
+      // the maximum number of packets, or wrote everything we wanted to.
+      bool return_chunk =
+          cur_payload_size >=
+              max_payload_size_ - SharedMemoryABI::kPacketHeaderSize ||
+          cur_num_packets == ChunkHeader::Packets::kMaxCount ||
+          !HasMoreDataToCommit();
+
+      if (return_chunk)
+        break;
+    }
+
+    auto new_packet_count = cur_chunk_.IncreasePacketCountTo(cur_num_packets);
+    PERFETTO_DCHECK(new_packet_count == cur_num_packets);
+
+    if (fragmenting_packet_) {
+      PERFETTO_DCHECK(cur_payload_size == max_payload_size_);
+      cur_chunk_.SetFlag(ChunkHeader::kLastPacketContinuesOnNextChunk);
+    }
+
+    arbiter_->ReturnCompletedChunk(std::move(cur_chunk_), target_buffer_,
+                                   &empty_patch_list);
+    return true;
+  }
+
+  std::unique_ptr<LocalBufferReader> local_buffer_reader_;
+  std::unique_ptr<std::vector<uint32_t>> packet_sizes_;
+  base::WeakPtr<SharedMemoryArbiterImpl> arbiter_;
+  const size_t max_payload_size_;
+  const WriterID writer_id_;
+  const BufferID target_buffer_;
+  const size_t chunks_per_batch_;
+  SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy_;
+  SharedMemoryABI::Chunk cur_chunk_;
+  // We receive the first chunk in the constructor, thus the next chunk will be
+  // the second one.
+  ChunkID next_chunk_id_ = kFirstChunkId + 1;
+  size_t packet_idx_ = 0;
+  uint32_t remaining_packet_size_ = 0;
+  bool fragmenting_packet_ = false;
+};
+
 }  // namespace
 
 StartupTraceWriter::StartupTraceWriter(
-    std::shared_ptr<StartupTraceWriterRegistryHandle> registry_handle)
+    std::shared_ptr<StartupTraceWriterRegistryHandle> registry_handle,
+    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy)
     : registry_handle_(std::move(registry_handle)),
+      buffer_exhausted_policy_(buffer_exhausted_policy),
       memory_buffer_(new protozero::ScatteredHeapBuffer()),
       memory_stream_writer_(
-          new protozero::ScatteredStreamWriter(memory_buffer_.get())) {
+          new protozero::ScatteredStreamWriter(memory_buffer_.get())),
+      packet_sizes_(new std::vector<uint32_t>()) {
   memory_buffer_->set_writer(memory_stream_writer_.get());
   PERFETTO_DETACH_FROM_THREAD(writer_thread_checker_);
 }
@@ -91490,13 +93123,19 @@ void StartupTraceWriter::ReturnToRegistry(
 }
 
 bool StartupTraceWriter::BindToArbiter(SharedMemoryArbiterImpl* arbiter,
-                                       BufferID target_buffer) {
+                                       BufferID target_buffer,
+                                       size_t chunks_per_batch) {
+  // LocalBufferCommitter requires a WeakPtr to the arbiter, and thus needs to
+  // execute on the arbiter's task runner.
+  PERFETTO_DCHECK(arbiter->task_runner()->RunsTasksOnCurrentThread());
+
   // Create and destroy trace writer without holding lock, since this will post
   // a task and task posting may trigger a trace event, which would cause a
   // deadlock. This may create a few more trace writers than necessary in cases
   // where a concurrent write is in progress (other than causing some
   // computational overhead, this is not problematic).
-  auto trace_writer = arbiter->CreateTraceWriter(target_buffer);
+  auto trace_writer =
+      arbiter->CreateTraceWriter(target_buffer, buffer_exhausted_policy_);
 
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -91514,16 +93153,33 @@ bool StartupTraceWriter::BindToArbiter(SharedMemoryArbiterImpl* arbiter,
       cur_packet_.reset();
     }
 
+    // Successfully bind if we don't have any data or no valid trace writer.
+    if (packet_sizes_->empty() || !trace_writer->writer_id()) {
+      trace_writer_ = std::move(trace_writer);
+      memory_buffer_.reset();
+      packet_sizes_.reset();
+      memory_stream_writer_.reset();
+      return true;
+    }
+
+    // We need to ensure that we commit at least one chunk now, otherwise the
+    // service might receive and erroneously start reading from a future chunk
+    // committed by the underlying trace writer. Thus, we attempt to acquire the
+    // first chunk and bail out if we fail (we'll retry later).
+    SharedMemoryABI::Chunk first_chunk =
+        NewChunk(arbiter, trace_writer->writer_id(), kFirstChunkId,
+                 /*fragmenting_packet=*/false, buffer_exhausted_policy_);
+    if (!first_chunk.is_valid())
+      return false;
+
     trace_writer_ = std::move(trace_writer);
     ChunkID next_chunk_id = CommitLocalBufferChunks(
-        arbiter, trace_writer_->writer_id(), target_buffer);
+        arbiter, trace_writer_->writer_id(), target_buffer, chunks_per_batch,
+        std::move(first_chunk));
 
     // The real TraceWriter should start writing at the subsequent chunk ID.
     bool success = trace_writer_->SetFirstChunkId(next_chunk_id);
     PERFETTO_DCHECK(success);
-
-    memory_stream_writer_.reset();
-    memory_buffer_.reset();
   }
 
   return true;
@@ -91638,7 +93294,7 @@ void StartupTraceWriter::OnMessageFinalized(protozero::Message* message) {
   PERFETTO_DCHECK(cur_packet_->is_finalized());
   // Finalize() is a no-op because the packet is already finalized.
   uint32_t packet_size = cur_packet_->Finalize();
-  packet_sizes_.push_back(packet_size);
+  packet_sizes_->push_back(packet_size);
 
   // Write is complete, reset the flag to allow binding.
   std::lock_guard<std::mutex> lock(lock_);
@@ -91649,96 +93305,37 @@ void StartupTraceWriter::OnMessageFinalized(protozero::Message* message) {
 ChunkID StartupTraceWriter::CommitLocalBufferChunks(
     SharedMemoryArbiterImpl* arbiter,
     WriterID writer_id,
-    BufferID target_buffer) {
-  // TODO(eseckler): Write and commit these chunks asynchronously. This would
-  // require that the service is informed of the missing initial chunks, e.g. by
-  // committing our first chunk here before the new trace writer has a chance to
-  // commit its first chunk. Otherwise the service wouldn't know to wait for our
-  // chunks.
-
-  if (packet_sizes_.empty() || !writer_id)
-    return 0;
+    BufferID target_buffer,
+    size_t chunks_per_batch,
+    SharedMemoryABI::Chunk first_chunk) {
+  PERFETTO_DCHECK(!packet_sizes_->empty());
+  PERFETTO_DCHECK(writer_id);
 
   memory_buffer_->AdjustUsedSizeOfCurrentSlice();
-  LocalBufferReader local_buffer_reader(memory_buffer_.get());
+  memory_stream_writer_.reset();
 
-  PERFETTO_DCHECK(local_buffer_reader.TotalUsedSize() ==
-                  std::accumulate(packet_sizes_.begin(), packet_sizes_.end(),
+  std::unique_ptr<LocalBufferReader> local_buffer_reader(
+      new LocalBufferReader(std::move(memory_buffer_)));
+
+  PERFETTO_DCHECK(local_buffer_reader->TotalUsedSize() ==
+                  std::accumulate(packet_sizes_->begin(), packet_sizes_->end(),
                                   static_cast<size_t>(0u)));
 
-  ChunkID next_chunk_id = 0;
-  SharedMemoryABI::Chunk cur_chunk =
-      NewChunk(arbiter, writer_id, next_chunk_id++, false);
+  std::unique_ptr<LocalBufferCommitter> committer(new LocalBufferCommitter(
+      std::move(local_buffer_reader), std::move(packet_sizes_),
+      arbiter->GetWeakPtr(), writer_id, target_buffer, chunks_per_batch,
+      buffer_exhausted_policy_, std::move(first_chunk)));
 
-  size_t max_payload_size = cur_chunk.payload_size();
-  size_t cur_payload_size = 0;
-  uint16_t cur_num_packets = 0;
-  size_t total_num_packets = packet_sizes_.size();
-  PatchList empty_patch_list;
-  for (size_t packet_idx = 0; packet_idx < total_num_packets; packet_idx++) {
-    uint32_t packet_size = packet_sizes_[packet_idx];
-    uint32_t remaining_packet_size = packet_size;
-    ++cur_num_packets;
-    do {
-      uint32_t fragment_size = static_cast<uint32_t>(
-          std::min(static_cast<size_t>(remaining_packet_size),
-                   max_payload_size - cur_payload_size -
-                       SharedMemoryABI::kPacketHeaderSize));
-      // Write packet header, i.e. the fragment size.
-      protozero::proto_utils::WriteRedundantVarInt(
-          fragment_size, cur_chunk.payload_begin() + cur_payload_size);
-      cur_payload_size += SharedMemoryABI::kPacketHeaderSize;
+  ChunkID next_chunk_id =
+      kFirstChunkId +
+      static_cast<ChunkID>(committer->GetTotalNumChunksRequired());
 
-      // Copy packet content into the chunk.
-      size_t bytes_read = local_buffer_reader.ReadBytes(
-          &cur_chunk, fragment_size, cur_payload_size);
-      PERFETTO_DCHECK(bytes_read == fragment_size);
-
-      cur_payload_size += fragment_size;
-      remaining_packet_size -= fragment_size;
-
-      bool last_write =
-          packet_idx == total_num_packets - 1 && remaining_packet_size == 0;
-
-      // We should return the current chunk if we've filled its payload, reached
-      // the maximum number of packets, or wrote everything we wanted to.
-      bool return_chunk =
-          cur_payload_size >=
-              max_payload_size - SharedMemoryABI::kPacketHeaderSize ||
-          cur_num_packets == ChunkHeader::Packets::kMaxCount || last_write;
-
-      if (return_chunk) {
-        auto new_packet_count =
-            cur_chunk.IncreasePacketCountTo(cur_num_packets);
-        PERFETTO_DCHECK(new_packet_count == cur_num_packets);
-
-        bool is_fragmenting = remaining_packet_size > 0;
-        if (is_fragmenting) {
-          PERFETTO_DCHECK(cur_payload_size == max_payload_size);
-          cur_chunk.SetFlag(ChunkHeader::kLastPacketContinuesOnNextChunk);
-        }
-
-        arbiter->ReturnCompletedChunk(std::move(cur_chunk), target_buffer,
-                                      &empty_patch_list);
-
-        // Avoid creating a new chunk after the last write.
-        if (!last_write) {
-          cur_chunk =
-              NewChunk(arbiter, writer_id, next_chunk_id++, is_fragmenting);
-          max_payload_size = cur_chunk.payload_size();
-          cur_payload_size = 0;
-          cur_num_packets = is_fragmenting ? 1 : 0;
-        } else {
-          PERFETTO_DCHECK(!is_fragmenting);
-        }
-      }
-    } while (remaining_packet_size > 0);
-  }
-
-  // The last chunk should have been returned.
-  PERFETTO_DCHECK(!cur_chunk.is_valid());
-  // We should have read all data from the local buffer.
-  PERFETTO_DCHECK(local_buffer_reader.DidReadAllData());
+  // Write the chunks to the SMB in smaller batches to avoid large bursts that
+  // could fill up the SMB completely and lead to stalls or data loss. We'll
+  // continue writing the chunks asynchronously. We need to ensure that we write
+  // at least one chunk now, otherwise the service might receive and erroneously
+  // start reading from a future chunk committed by the underlying trace writer.
+  LocalBufferCommitter::CommitRemainingDataInBatches(std::move(committer));
 
   return next_chunk_id;
 }
@@ -91763,6 +93360,8 @@ ChunkID StartupTraceWriter::CommitLocalBufferChunks(
 
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/startup_trace_writer_registry.h"
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
 
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
@@ -91798,11 +93397,13 @@ StartupTraceWriterRegistry::~StartupTraceWriterRegistry() {
 }
 
 std::unique_ptr<StartupTraceWriter>
-StartupTraceWriterRegistry::CreateUnboundTraceWriter() {
+StartupTraceWriterRegistry::CreateUnboundTraceWriter(
+    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy) {
   std::lock_guard<std::mutex> lock(lock_);
   PERFETTO_DCHECK(!arbiter_);  // Should only be called while unbound.
-  std::unique_ptr<StartupTraceWriter> writer(new StartupTraceWriter(handle_));
-  unbound_writers_.insert(writer.get());
+  std::unique_ptr<StartupTraceWriter> writer(
+      new StartupTraceWriter(handle_, buffer_exhausted_policy));
+  unbound_writers_.push_back(writer.get());
   return writer;
 }
 
@@ -91810,17 +93411,19 @@ void StartupTraceWriterRegistry::ReturnTraceWriter(
     std::unique_ptr<StartupTraceWriter> trace_writer) {
   std::lock_guard<std::mutex> lock(lock_);
   PERFETTO_DCHECK(!trace_writer->write_in_progress_);
+  auto it = std::find(unbound_writers_.begin(), unbound_writers_.end(),
+                      trace_writer.get());
 
   // If the registry is already bound, but the writer wasn't, bind it now.
   if (arbiter_) {
-    auto it = unbound_writers_.find(trace_writer.get());
     if (it == unbound_writers_.end()) {
       // Nothing to do, the writer was already bound.
       return;
     }
 
     // This should succeed since nobody can write to this writer concurrently.
-    bool success = trace_writer->BindToArbiter(arbiter_, target_buffer_);
+    bool success = trace_writer->BindToArbiter(arbiter_, target_buffer_,
+                                               chunks_per_batch_);
     PERFETTO_DCHECK(success);
     unbound_writers_.erase(it);
 
@@ -91829,8 +93432,8 @@ void StartupTraceWriterRegistry::ReturnTraceWriter(
   }
 
   // If the registry was not bound yet, keep the writer alive until it is.
-  PERFETTO_DCHECK(unbound_writers_.count(trace_writer.get()));
-  unbound_writers_.erase(trace_writer.get());
+  PERFETTO_DCHECK(it != unbound_writers_.end());
+  unbound_writers_.erase(it);
   unbound_owned_writers_.push_back(std::move(trace_writer));
 }
 
@@ -91846,6 +93449,24 @@ void StartupTraceWriterRegistry::BindToArbiter(
     arbiter_ = arbiter;
     target_buffer_ = target_buffer;
     task_runner_ = task_runner;
+
+    // Attempt to use at most half the SMB for binding of StartupTraceWriters at
+    // the same time. In the worst case, all writers are binding at the same
+    // time, so divide it up between them.
+    //
+    // TODO(eseckler): This assumes that there's only a single registry at the
+    // same time. SharedMemoryArbiterImpl should advise us how much of the SMB
+    // we're allowed to use in the first place.
+    size_t num_writers =
+        unbound_owned_writers_.size() + unbound_writers_.size();
+    if (num_writers) {
+      chunks_per_batch_ = arbiter_->num_pages() / 2 / num_writers;
+    } else {
+      chunks_per_batch_ = arbiter_->num_pages() / 2;
+    }
+    // We should use at least one chunk per batch.
+    chunks_per_batch_ = std::max(chunks_per_batch_, static_cast<size_t>(1u));
+
     // Weakptrs should be valid on |task_runner|. For this, the factory needs to
     // be created on |task_runner|, i.e. BindToArbiter must be called on
     // |task_runner|.
@@ -91862,7 +93483,8 @@ void StartupTraceWriterRegistry::BindToArbiter(
   // Bind and destroy the owned writers.
   for (const auto& writer : unbound_owned_writers) {
     // This should succeed since nobody can write to these writers concurrently.
-    bool success = writer->BindToArbiter(arbiter_, target_buffer_);
+    bool success =
+        writer->BindToArbiter(arbiter_, target_buffer_, chunks_per_batch_);
     PERFETTO_DCHECK(success);
   }
   unbound_owned_writers.clear();
@@ -91873,10 +93495,10 @@ void StartupTraceWriterRegistry::BindToArbiter(
 void StartupTraceWriterRegistry::TryBindWriters() {
   std::lock_guard<std::mutex> lock(lock_);
   for (auto it = unbound_writers_.begin(); it != unbound_writers_.end();) {
-    if ((*it)->BindToArbiter(arbiter_, target_buffer_)) {
+    if ((*it)->BindToArbiter(arbiter_, target_buffer_, chunks_per_batch_)) {
       it = unbound_writers_.erase(it);
     } else {
-      it++;
+      break;
     }
   }
   if (!unbound_writers_.empty()) {
@@ -94047,8 +95669,14 @@ TraceBuffer::ReadPacketResult TraceBuffer::ReadNextPacketInChunk(
   const uint8_t* next_packet = packet_data + packet_size;
   if (PERFETTO_UNLIKELY(next_packet <= packet_begin ||
                         next_packet > record_end)) {
-    stats_.set_abi_violations(stats_.abi_violations() + 1);
-    PERFETTO_DCHECK(suppress_sanity_dchecks_for_testing_);
+    // In SharedMemoryArbiter::BufferExhaustedPolicy::kDrop mode, TraceWriter
+    // may abort a fragmented packet by writing an invalid size in the last
+    // fragment's header. We should handle this case without recording an ABI
+    // violation (since Android R).
+    if (packet_size != SharedMemoryABI::kPacketSizeDropPacket) {
+      stats_.set_abi_violations(stats_.abi_violations() + 1);
+      PERFETTO_DCHECK(suppress_sanity_dchecks_for_testing_);
+    }
     chunk_meta->cur_fragment_offset = 0;
     chunk_meta->num_fragments_read = chunk_meta->num_fragments;
     if (PERFETTO_LIKELY(chunk_meta->is_complete())) {
@@ -96255,6 +97883,7 @@ void TraceStats::BufferStats::ToProto(
 #include <utility>
 
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/thread_annotations.h"
 // gen_amalgamated expanded: #include "perfetto/protozero/proto_utils.h"
 // gen_amalgamated expanded: #include "src/tracing/core/shared_memory_arbiter_impl.h"
 
@@ -96268,14 +97897,18 @@ namespace perfetto {
 
 namespace {
 constexpr size_t kPacketHeaderSize = SharedMemoryABI::kPacketHeaderSize;
+uint8_t g_garbage_chunk[1024];
 }  // namespace
 
-TraceWriterImpl::TraceWriterImpl(SharedMemoryArbiterImpl* shmem_arbiter,
-                                 WriterID id,
-                                 BufferID target_buffer)
+TraceWriterImpl::TraceWriterImpl(
+    SharedMemoryArbiterImpl* shmem_arbiter,
+    WriterID id,
+    BufferID target_buffer,
+    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy)
     : shmem_arbiter_(shmem_arbiter),
       id_(id),
       target_buffer_(target_buffer),
+      buffer_exhausted_policy_(buffer_exhausted_policy),
       protobuf_stream_writer_(this) {
   // TODO(primiano): we could handle the case of running out of TraceWriterID(s)
   // more gracefully and always return a no-op TracePacket in NewTracePacket().
@@ -96322,12 +97955,15 @@ TraceWriterImpl::TracePacketHandle TraceWriterImpl::NewTracePacket() {
   static_assert(kPacketHeaderSize == kMessageLengthFieldSize,
                 "The packet header must match the Message header size");
 
+  bool was_dropping_packets = drop_packets_;
+
   // It doesn't make sense to begin a packet that is going to fragment
   // immediately after (8 is just an arbitrary estimation on the minimum size of
   // a realistic packet).
   bool chunk_too_full =
       protobuf_stream_writer_.bytes_available() < kPacketHeaderSize + 8;
-  if (chunk_too_full || reached_max_packets_per_chunk_) {
+  if (chunk_too_full || reached_max_packets_per_chunk_ ||
+      retry_new_chunk_after_packet_) {
     protobuf_stream_writer_.Reset(GetNewBuffer());
   }
 
@@ -96343,12 +97979,24 @@ TraceWriterImpl::TracePacketHandle TraceWriterImpl::NewTracePacket() {
   uint8_t* header = protobuf_stream_writer_.ReserveBytes(kPacketHeaderSize);
   memset(header, 0, kPacketHeaderSize);
   cur_packet_->set_size_field(header);
-  uint16_t new_packet_count = cur_chunk_.IncrementPacketCount();
-  reached_max_packets_per_chunk_ =
-      new_packet_count == ChunkHeader::Packets::kMaxCount;
+
   TracePacketHandle handle(cur_packet_.get());
   cur_fragment_start_ = protobuf_stream_writer_.write_ptr();
   fragmenting_packet_ = true;
+
+  if (PERFETTO_LIKELY(!drop_packets_)) {
+    uint16_t new_packet_count = cur_chunk_.IncrementPacketCount();
+    reached_max_packets_per_chunk_ =
+        new_packet_count == ChunkHeader::Packets::kMaxCount;
+
+    if (PERFETTO_UNLIKELY(was_dropping_packets)) {
+      // We've succeeded to get a new chunk from the SMB after we entered
+      // drop_packets_ mode. Record a marker into the new packet to indicate the
+      // data loss.
+      cur_packet_->set_previous_packet_dropped(true);
+    }
+  }
+
   return handle;
 }
 
@@ -96361,7 +98009,109 @@ TraceWriterImpl::TracePacketHandle TraceWriterImpl::NewTracePacket() {
 // In this case |fragmenting_packet_| == false and we just want a new chunk
 // without creating any fragments.
 protozero::ContiguousMemoryRange TraceWriterImpl::GetNewBuffer() {
+  if (fragmenting_packet_ && drop_packets_) {
+    // We can't write the remaining data of the fragmenting packet to a new
+    // chunk, because we have already lost some of its data in the garbage
+    // chunk. Thus, we will wrap around in the garbage chunk, wait until the
+    // current packet was completed, and then attempt to get a new chunk from
+    // the SMB again. Instead, if |drop_packets_| is true and
+    // |fragmenting_packet_| is false, we try to acquire a valid chunk because
+    // the SMB exhaustion might be resolved.
+    retry_new_chunk_after_packet_ = true;
+    return protozero::ContiguousMemoryRange{
+        &g_garbage_chunk[0], &g_garbage_chunk[0] + sizeof(g_garbage_chunk)};
+  }
+
+  // Attempt to grab the next chunk before finalizing the current one, so that
+  // we know whether we need to start dropping packets before writing the
+  // current packet fragment's header.
+  ChunkHeader::Packets packets = {};
   if (fragmenting_packet_) {
+    packets.count = 1;
+    packets.flags = ChunkHeader::kFirstPacketContinuesFromPrevChunk;
+  }
+
+  // The memory order of the stores below doesn't really matter. This |header|
+  // is just a local temporary object. The GetNewChunk() call below will copy it
+  // into the shared buffer with the proper barriers.
+  ChunkHeader header = {};
+  header.writer_id.store(id_, std::memory_order_relaxed);
+  header.chunk_id.store(next_chunk_id_, std::memory_order_relaxed);
+  header.packets.store(packets, std::memory_order_relaxed);
+
+  SharedMemoryABI::Chunk new_chunk =
+      shmem_arbiter_->GetNewChunk(header, buffer_exhausted_policy_);
+  if (!new_chunk.is_valid()) {
+    // Shared memory buffer exhausted, switch into |drop_packets_| mode. We'll
+    // drop data until the garbage chunk has been filled once and then retry.
+
+    // If we started a packet in one of the previous (valid) chunks, we need to
+    // tell the service to discard it.
+    if (fragmenting_packet_) {
+      // We can only end up here if the previous chunk was a valid chunk,
+      // because we never try to acquire a new chunk in |drop_packets_| mode
+      // while fragmenting.
+      PERFETTO_DCHECK(!drop_packets_);
+
+      // Backfill the last fragment's header with an invalid size (too large),
+      // so that the service's TraceBuffer throws out the incomplete packet.
+      // It'll restart reading from the next chunk we submit.
+      WriteRedundantVarInt(SharedMemoryABI::kPacketSizeDropPacket,
+                           cur_packet_->size_field());
+
+      // Reset the size field, since we should not write the current packet's
+      // size anymore after this.
+      cur_packet_->set_size_field(nullptr);
+
+      // We don't set kLastPacketContinuesOnNextChunk or kChunkNeedsPatching on
+      // the last chunk, because its last fragment will be discarded anyway.
+      // However, the current packet fragment points to a valid |cur_chunk_| and
+      // may have non-finalized nested messages which will continue in the
+      // garbage chunk and currently still point into |cur_chunk_|. As we are
+      // about to return |cur_chunk_|, we need to invalidate the size fields of
+      // those nested messages. Normally we move them in the |patch_list_| (see
+      // below) but in this case, it doesn't make sense to send patches for a
+      // fragment that will be discarded for sure. Thus, we clean up any size
+      // field references into |cur_chunk_|.
+      for (auto* nested_msg = cur_packet_->nested_message(); nested_msg;
+           nested_msg = nested_msg->nested_message()) {
+        uint8_t* const cur_hdr = nested_msg->size_field();
+
+        // If this is false the protozero Message has already been instructed to
+        // write, upon Finalize(), its size into the patch list.
+        bool size_field_points_within_chunk =
+            cur_hdr >= cur_chunk_.payload_begin() &&
+            cur_hdr + kMessageLengthFieldSize <= cur_chunk_.end();
+
+        if (size_field_points_within_chunk)
+          nested_msg->set_size_field(nullptr);
+      }
+    }  // if (fragmenting_packet_)
+
+    if (cur_chunk_.is_valid()) {
+      shmem_arbiter_->ReturnCompletedChunk(std::move(cur_chunk_),
+                                           target_buffer_, &patch_list_);
+    }
+
+    drop_packets_ = true;
+    cur_chunk_ = SharedMemoryABI::Chunk();  // Reset to an invalid chunk.
+    reached_max_packets_per_chunk_ = false;
+    retry_new_chunk_after_packet_ = false;
+
+    PERFETTO_ANNOTATE_BENIGN_RACE_SIZED(&g_garbage_chunk,
+                                        sizeof(g_garbage_chunk),
+                                        "nobody reads the garbage chunk")
+    return protozero::ContiguousMemoryRange{
+        &g_garbage_chunk[0], &g_garbage_chunk[0] + sizeof(g_garbage_chunk)};
+  }  // if (!new_chunk.is_valid())
+
+  PERFETTO_DCHECK(new_chunk.is_valid());
+
+  if (fragmenting_packet_) {
+    // We should not be fragmenting a packet after we exited drop_packets_ mode,
+    // because we only retry to get a new chunk when a fresh packet is started.
+    PERFETTO_DCHECK(!drop_packets_);
+
     uint8_t* const wptr = protobuf_stream_writer_.write_ptr();
     PERFETTO_DCHECK(wptr >= cur_fragment_start_);
     uint32_t partial_size = static_cast<uint32_t>(wptr - cur_fragment_start_);
@@ -96419,24 +98169,13 @@ protozero::ContiguousMemoryRange TraceWriterImpl::GetNewBuffer() {
                                          &patch_list_);
   }
 
-  // Start a new chunk.
-
-  ChunkHeader::Packets packets = {};
-  if (fragmenting_packet_) {
-    packets.count = 1;
-    packets.flags = ChunkHeader::kFirstPacketContinuesFromPrevChunk;
-  }
-
-  // The memory order of the stores below doesn't really matter. This |header|
-  // is just a local temporary object. The GetNewChunk() call below will copy it
-  // into the shared buffer with the proper barriers.
-  ChunkHeader header = {};
-  header.writer_id.store(id_, std::memory_order_relaxed);
-  header.chunk_id.store(next_chunk_id_++, std::memory_order_relaxed);
-  header.packets.store(packets, std::memory_order_relaxed);
-
-  cur_chunk_ = shmem_arbiter_->GetNewChunk(header);
+  // Switch to the new chunk.
+  drop_packets_ = false;
   reached_max_packets_per_chunk_ = false;
+  retry_new_chunk_after_packet_ = false;
+  next_chunk_id_++;
+  cur_chunk_ = std::move(new_chunk);
+
   uint8_t* payload_begin = cur_chunk_.payload_begin();
   if (fragmenting_packet_) {
     cur_packet_->set_size_field(payload_begin);
@@ -96532,6 +98271,7 @@ class TracingServiceImpl : public TracingService {
   struct DataSourceInstance;
 
  public:
+  static constexpr size_t kDefaultShmPageSize = base::kPageSize;
   static constexpr size_t kDefaultShmSize = 256 * 1024ul;
   static constexpr size_t kMaxShmSize = 32 * 1024 * 1024ul;
   static constexpr uint32_t kDataSourceStopTimeoutMs = 5000;
@@ -96606,6 +98346,7 @@ class TracingServiceImpl : public TracingService {
     size_t shared_buffer_page_size_kb_ = 0;
     SharedMemoryABI shmem_abi_;
     size_t shmem_size_hint_bytes_ = 0;
+    size_t shmem_page_size_hint_bytes_ = 0;
     const std::string name_;
     bool in_process_;
     bool smb_scraping_enabled_;
@@ -96740,7 +98481,8 @@ class TracingServiceImpl : public TracingService {
       size_t shared_memory_size_hint_bytes = 0,
       bool in_process = false,
       ProducerSMBScrapingMode smb_scraping_mode =
-          ProducerSMBScrapingMode::kDefault) override;
+          ProducerSMBScrapingMode::kDefault,
+      size_t shared_memory_page_size_hint_bytes = 0) override;
 
   std::unique_ptr<TracingService::ConsumerEndpoint> ConnectConsumer(
       Consumer*,
@@ -97513,7 +99255,6 @@ class PERFETTO_EXPORT TracingServiceState {
 namespace perfetto {
 
 namespace {
-constexpr size_t kDefaultShmPageSize = base::kPageSize;
 constexpr int kMaxBuffersPerConsumer = 128;
 constexpr base::TimeMillis kSnapshotsInterval(10 * 1000);
 constexpr int kDefaultWriteIntoFilePeriodMs = 5000;
@@ -97561,6 +99302,8 @@ uid_t geteuid() {
 
 // These constants instead are defined in the header because are used by tests.
 constexpr size_t TracingServiceImpl::kDefaultShmSize;
+constexpr size_t TracingServiceImpl::kDefaultShmPageSize;
+
 constexpr size_t TracingServiceImpl::kMaxShmSize;
 constexpr uint32_t TracingServiceImpl::kDataSourceStopTimeoutMs;
 constexpr uint8_t TracingServiceImpl::kSyncMarker[];
@@ -97594,7 +99337,8 @@ TracingServiceImpl::ConnectProducer(Producer* producer,
                                     const std::string& producer_name,
                                     size_t shared_memory_size_hint_bytes,
                                     bool in_process,
-                                    ProducerSMBScrapingMode smb_scraping_mode) {
+                                    ProducerSMBScrapingMode smb_scraping_mode,
+                                    size_t shared_memory_page_size_hint_bytes) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
 
   if (lockdown_mode_ && uid != geteuid()) {
@@ -97628,6 +99372,7 @@ TracingServiceImpl::ConnectProducer(Producer* producer,
   auto it_and_inserted = producers_.emplace(id, endpoint.get());
   PERFETTO_DCHECK(it_and_inserted.second);
   endpoint->shmem_size_hint_bytes_ = shared_memory_size_hint_bytes;
+  endpoint->shmem_page_size_hint_bytes_ = shared_memory_page_size_hint_bytes;
   task_runner_->PostTask(std::bind(&Producer::OnConnect, endpoint->producer_));
 
   return std::move(endpoint);
@@ -99296,14 +101041,22 @@ TracingServiceImpl::DataSourceInstance* TracingServiceImpl::SetupDataSource(
                 ds_config.name().c_str(), global_id);
   if (!producer->shared_memory()) {
     // Determine the SMB page size. Must be an integer multiple of 4k.
+    // As for the SMB size below, the decision tree is as follows:
+    // 1. Give priority to what is defined in the trace config.
+    // 2. If unset give priority to the hint passed by the producer.
+    // 3. Keep within bounds and ensure it's a multiple of 4k.
     size_t page_size = std::min<size_t>(producer_config.page_size_kb() * 1024,
                                         SharedMemoryABI::kMaxPageSize);
+    if (page_size == 0) {
+      page_size = std::min<size_t>(producer->shmem_page_size_hint_bytes_,
+                                   SharedMemoryABI::kMaxPageSize);
+    }
     if (page_size < base::kPageSize || page_size % base::kPageSize != 0)
       page_size = kDefaultShmPageSize;
     producer->shared_buffer_page_size_kb_ = page_size / 1024;
 
     // Determine the SMB size. Must be an integer multiple of the SMB page size.
-    // The decisional tree is as follows:
+    // The decision tree is as follows:
     // 1. Give priority to what defined in the trace config.
     // 2. If unset give priority to the hint passed by the producer.
     // 3. Keep within bounds and ensure it's a multiple of the page size.
@@ -99404,7 +101157,10 @@ void TracingServiceImpl::ApplyChunkPatches(
     static_assert(std::numeric_limits<ChunkID>::max() == kMaxChunkID,
                   "Add a '|| chunk_id > kMaxChunkID' below if this fails");
     if (!writer_id || writer_id > kMaxWriterID || !buf) {
-      PERFETTO_ELOG(
+      // This can genuinely happen when the trace is stopped. The producers
+      // might see the stop signal with some delay and try to keep sending
+      // patches left soon after.
+      PERFETTO_DLOG(
           "Received invalid chunks_to_patch request from Producer: %" PRIu16
           ", BufferID: %" PRIu32 " ChunkdID: %" PRIu32 " WriterID: %" PRIu16,
           producer_id_trusted, chunk.target_buffer(), chunk_id, writer_id);
@@ -101341,7 +103097,9 @@ class ProducerIPCClient {
       const std::string& producer_name,
       base::TaskRunner*,
       TracingService::ProducerSMBScrapingMode smb_scraping_mode =
-          TracingService::ProducerSMBScrapingMode::kDefault);
+          TracingService::ProducerSMBScrapingMode::kDefault,
+      size_t shared_memory_size_hint_bytes = 0,
+      size_t shared_memory_page_size_hint_bytes = 0);
 
  protected:
   ProducerIPCClient() = delete;
@@ -101408,7 +103166,9 @@ class ProducerIPCClientImpl : public TracingService::ProducerEndpoint,
                         Producer*,
                         const std::string& producer_name,
                         base::TaskRunner*,
-                        TracingService::ProducerSMBScrapingMode);
+                        TracingService::ProducerSMBScrapingMode,
+                        size_t shared_memory_size_hint_bytes = 0,
+                        size_t shared_memory_page_size_hint_bytes = 0);
   ~ProducerIPCClientImpl() override;
 
   // TracingService::ProducerEndpoint implementation.
@@ -101461,6 +103221,8 @@ class ProducerIPCClientImpl : public TracingService::ProducerEndpoint,
   std::set<DataSourceInstanceID> data_sources_setup_;
   bool connected_ = false;
   std::string const name_;
+  size_t shared_memory_page_size_hint_bytes_ = 0;
+  size_t shared_memory_size_hint_bytes_ = 0;
   TracingService::ProducerSMBScrapingMode const smb_scraping_mode_;
   PERFETTO_THREAD_CHECKER(thread_checker_)
 };
@@ -101512,10 +103274,14 @@ std::unique_ptr<TracingService::ProducerEndpoint> ProducerIPCClient::Connect(
     Producer* producer,
     const std::string& producer_name,
     base::TaskRunner* task_runner,
-    TracingService::ProducerSMBScrapingMode smb_scraping_mode) {
+    TracingService::ProducerSMBScrapingMode smb_scraping_mode,
+    size_t shared_memory_size_hint_bytes,
+    size_t shared_memory_page_size_hint_bytes) {
   return std::unique_ptr<TracingService::ProducerEndpoint>(
       new ProducerIPCClientImpl(service_sock_name, producer, producer_name,
-                                task_runner, smb_scraping_mode));
+                                task_runner, smb_scraping_mode,
+                                shared_memory_size_hint_bytes,
+                                shared_memory_page_size_hint_bytes));
 }
 
 ProducerIPCClientImpl::ProducerIPCClientImpl(
@@ -101523,12 +103289,16 @@ ProducerIPCClientImpl::ProducerIPCClientImpl(
     Producer* producer,
     const std::string& producer_name,
     base::TaskRunner* task_runner,
-    TracingService::ProducerSMBScrapingMode smb_scraping_mode)
+    TracingService::ProducerSMBScrapingMode smb_scraping_mode,
+    size_t shared_memory_size_hint_bytes,
+    size_t shared_memory_page_size_hint_bytes)
     : producer_(producer),
       task_runner_(task_runner),
       ipc_channel_(ipc::Client::CreateInstance(service_sock_name, task_runner)),
       producer_port_(this /* event_listener */),
       name_(producer_name),
+      shared_memory_page_size_hint_bytes_(shared_memory_page_size_hint_bytes),
+      shared_memory_size_hint_bytes_(shared_memory_size_hint_bytes),
       smb_scraping_mode_(smb_scraping_mode) {
   ipc_channel_->BindService(producer_port_.GetWeakPtr());
   PERFETTO_DCHECK_THREAD(thread_checker_);
@@ -101551,6 +103321,10 @@ void ProducerIPCClientImpl::OnConnect() {
       });
   protos::InitializeConnectionRequest req;
   req.set_producer_name(name_);
+  req.set_shared_memory_size_hint_bytes(
+      static_cast<uint32_t>(shared_memory_size_hint_bytes_));
+  req.set_shared_memory_page_size_hint_bytes(
+      static_cast<uint32_t>(shared_memory_page_size_hint_bytes_));
   switch (smb_scraping_mode_) {
     case TracingService::ProducerSMBScrapingMode::kDefault:
       // No need to set the mode, it defaults to use the service default if
@@ -102559,8 +104333,9 @@ void ProducerIPCService::InitializeConnection(
   // ConnectProducer will call OnConnect() on the next task.
   producer->service_endpoint = core_service_->ConnectProducer(
       producer.get(), client_info.uid(), req.producer_name(),
-      req.shared_memory_size_hint_bytes(), /*in_process=*/false,
-      smb_scraping_mode);
+      req.shared_memory_size_hint_bytes(),
+      /*in_process=*/false, smb_scraping_mode,
+      req.shared_memory_page_size_hint_bytes());
 
   // Could happen if the service has too many producers connected.
   if (!producer->service_endpoint)
@@ -103242,10 +105017,20 @@ class TracingTLS;
 // There is one of these object per DataSource instance (up to
 // kMaxDataSourceInstances).
 struct DataSourceState {
-  // If false the data source is initialized but not started yet (or stopped).
-  // This is set right before calling OnStart() and cleared right before calling
-  // OnStop()
-  bool started = false;
+  // This boolean flag determines whether the DataSource::Trace() method should
+  // do something or be a no-op. This flag doesn't give the full guarantee
+  // that tracing data will be visible in the trace, it just makes it so that
+  // the client attemps writing trace data and interacting with the service.
+  // For instance, when a tracing session ends the service will reject data
+  // commits that arrive too late even if the producer hasn't received the stop
+  // IPC message.
+  // This flag is set right before calling OnStart() and cleared right before
+  // calling OnStop(), unless using HandleStopAsynchronously() (see comments
+  // in data_source.h).
+  // Keep this flag as the first field. This allows the compiler to directly
+  // dereference the DataSourceState* pointer in the trace fast-path without
+  // doing extra pointr arithmetic.
+  bool trace_lambda_enabled = false;
 
   // The central buffer id that all TraceWriter(s) created by this data source
   // must target.
@@ -103604,7 +105389,7 @@ class PERFETTO_EXPORT TracingMuxer {
   static TracingMuxer* instance_;
   Platform* const platform_ = nullptr;
 
-  // Incremented upon each data source stop. See comment in tracing_tls.h.
+  // Incremented every time a data source is destroyed. See tracing_tls.h.
   std::atomic<uint32_t> generation_{};
 };
 
@@ -103719,20 +105504,48 @@ class PERFETTO_EXPORT DataSourceBase {
  public:
   virtual ~DataSourceBase();
 
+  // TODO(primiano): change the const& args below to be pointers instead. It
+  // makes it more awkward to handle output arguments and require mutable(s).
+  // This requires synchronizing a breaking API change for existing embedders.
+
   // OnSetup() is invoked when tracing is configured. In most cases this happens
   // just before starting the trace. In the case of deferred start (see
   // deferred_start in trace_config.proto) start might happen later.
-  struct SetupArgs {
+  class SetupArgs {
+   public:
     // This is valid only within the scope of the OnSetup() call and must not
     // be retained.
     const DataSourceConfig* config = nullptr;
   };
   virtual void OnSetup(const SetupArgs&);
 
-  struct StartArgs {};
+  class StartArgs {};
   virtual void OnStart(const StartArgs&);
 
-  struct StopArgs {};
+  class StopArgs {
+   public:
+    virtual ~StopArgs();
+
+    // HandleAsynchronously() can optionally be called to defer the tracing
+    // session stop and write tracing data just before stopping.
+    // This function returns a closure that must be invoked after the last
+    // trace events have been emitted. The returned closure can be called from
+    // any thread. The caller also needs to explicitly call TraceContext.Flush()
+    // from the last Trace() lambda invocation because no other implicit flushes
+    // will happen after the stop signal.
+    // When this function is called, the tracing service will defer the stop of
+    // the tracing session until the returned closure is invoked.
+    // However, the caller cannot hang onto this closure for too long. The
+    // tracing service will forcefully stop the tracing session without waiting
+    // for pending producers after TraceConfig.data_source_stop_timeout_ms
+    // (default: 5s, can be overridden by Consumers when starting a trace).
+    // If the closure is called after this timeout an error will be logged and
+    // the trace data emitted will not be present in the trace. No other
+    // functional side effects (e.g. crashes or corruptions) will happen. In
+    // other words, it is fine to accidentally hold onto this closure for too
+    // long but, if that happens, some tracing data will be lost.
+    virtual std::function<void()> HandleStopAsynchronously() const = 0;
+  };
   virtual void OnStop(const StopArgs&);
 };
 
@@ -103754,6 +105567,22 @@ class DataSource : public DataSourceBase {
     TracePacketHandle NewTracePacket() {
       return trace_writer_->NewTracePacket();
     }
+
+    // Forces a commit of the thread-local tracing data written so far to the
+    // service. This is almost never required (tracing data is periodically
+    // committed as trace pages are filled up) and has a non-negligible
+    // performance hit (requires an IPC + refresh of the current thread-local
+    // chunk). The only case when this should be used is when handling OnStop()
+    // asynchronously, to ensure sure that the data is committed before the
+    // Stop timeout expires.
+    // The TracePacketHandle obtained by the last NewTracePacket() call must be
+    // finalized before calling Flush() (either implicitly by going out of scope
+    // or by explicitly calling Finalize()).
+    // |cb| is an optional callback. When non-null it will request the
+    // service to ACK the flush and will be invoked on an internal thread after
+    // the service has  acknowledged it. The callback might be NEVER INVOKED if
+    // the service crashes or the IPC connection is dropped.
+    void Flush(std::function<void()> cb = {}) { trace_writer_->Flush(cb); }
 
     // Returns a RAII handle to access the data source instance, guaranteeing
     // that it won't be deleted on another thread (because of trace stopping)
@@ -103883,7 +105712,7 @@ class DataSource : public DataSourceBase {
         instances =
             static_state_.valid_instances.load(std::memory_order_acquire);
         instance_state = static_state_.TryGetCached(instances, i);
-        if (!instance_state || !instance_state->started)
+        if (!instance_state || !instance_state->trace_lambda_enabled)
           return;
         tls_inst.backend_id = instance_state->backend_id;
         tls_inst.buffer_id = instance_state->buffer_id;
@@ -103937,6 +105766,16 @@ class DataSource : public DataSourceBase {
 
 }  // namespace perfetto
 
+// If a data source is used across translation units, this declaration must be
+// placed into the header file defining the data source.
+#define PERFETTO_DECLARE_DATA_SOURCE_STATIC_MEMBERS(X)         \
+  template <>                                                  \
+  perfetto::internal::DataSourceStaticState                    \
+      perfetto::DataSource<X>::static_state_;                  \
+  template <>                                                  \
+  thread_local perfetto::internal::DataSourceThreadLocalState* \
+      perfetto::DataSource<X>::tls_state_
+
 // The API client must use this in a translation unit. This is because it needs
 // to instantiate the static storage for the datasource to allow the fastpath
 // enabled check.
@@ -103969,6 +105808,7 @@ class DataSource : public DataSourceBase {
 
 namespace perfetto {
 
+DataSourceBase::StopArgs::~StopArgs() = default;
 DataSourceBase::~DataSourceBase() = default;
 void DataSourceBase::OnSetup(const SetupArgs&) {}
 void DataSourceBase::OnStart(const StartArgs&) {}
@@ -104212,8 +106052,10 @@ std::unique_ptr<ProducerEndpoint> InProcessTracingBackend::ConnectProducer(
 
   return GetOrCreateService(args.task_runner)
       ->ConnectProducer(args.producer, /*uid=*/0, args.producer_name,
-                        /*shm_hint=*/0, /*in_process=*/true,
-                        TracingService::ProducerSMBScrapingMode::kEnabled);
+                        /*shm_hint=*/0,
+                        /*in_process=*/true,
+                        TracingService::ProducerSMBScrapingMode::kEnabled,
+                        /*shm_page_hint*/ 0);
 }
 
 std::unique_ptr<ConsumerEndpoint> InProcessTracingBackend::ConnectConsumer(
@@ -104265,6 +106107,7 @@ TracingService* InProcessTracingBackend::GetOrCreateService(
 #include <vector>
 
 // gen_amalgamated expanded: #include "perfetto/base/export.h"
+// gen_amalgamated expanded: #include "perfetto/base/logging.h"
 
 namespace perfetto {
 
@@ -104299,6 +106142,10 @@ struct TracingInitArgs {
   // of platform-specific bits like thread creation and TLS slot handling. If
   // not set it will use Platform::GetDefaultPlatform().
   Platform* platform = nullptr;
+
+ protected:
+  friend class Tracing;
+  bool dcheck_is_on_ = PERFETTO_DCHECK_IS_ON();
 };
 
 // The entry-point for using perfetto.
@@ -104308,9 +106155,12 @@ class PERFETTO_EXPORT Tracing {
   // with a user-provided backend. Can only be called once.
   static void Initialize(const TracingInitArgs&);
 
+  // Start a new tracing session using the given tracing backend. Use
+  // |kUnspecifiedBackend| to select an available backend automatically.
   // For the moment this can be used only when initializing tracing in
   // kInProcess mode. For the system mode use the 'bin/perfetto' cmdline client.
-  static std::unique_ptr<TracingSession> NewTrace(BackendType);
+  static std::unique_ptr<TracingSession> NewTrace(
+      BackendType = kUnspecifiedBackend);
 
  private:
   Tracing() = delete;
@@ -104324,11 +106174,24 @@ class PERFETTO_EXPORT TracingSession {
   // TODO(primiano): add an error callback.
   virtual void Setup(const TraceConfig&) = 0;
 
+  // Enable tracing asynchronously.
   virtual void Start() = 0;
 
+  // Enable tracing and block until tracing has started. Note that if data
+  // sources are registered after this call was initiated, the call may return
+  // before the additional data sources have started. Also, if other producers
+  // (e.g., with system-wide tracing) have registered data sources without start
+  // notification support, this call may return before those data sources have
+  // started.
+  virtual void StartBlocking() = 0;
+
+  // Disable tracing asynchronously.
   // Use SetOnStopCallback() to get a notification when the tracing session is
   // fully stopped and all data sources have acked.
   virtual void Stop() = 0;
+
+  // Disable tracing and block until tracing has stopped.
+  virtual void StopBlocking() = 0;
 
   // This callback will be invoked when tracing is disabled.
   // This can happen either when explicitly calling TracingSession.Stop() or
@@ -104394,6 +106257,7 @@ class PERFETTO_EXPORT TracingSession {
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -104479,7 +106343,8 @@ class TracingMuxerImpl : public TracingMuxer {
                        DataSourceInstanceID,
                        const DataSourceConfig&);
   void StartDataSource(TracingBackendId, DataSourceInstanceID);
-  void StopDataSource(TracingBackendId, DataSourceInstanceID);
+  void StopDataSource_AsyncBegin(TracingBackendId, DataSourceInstanceID);
+  void StopDataSource_AsyncEnd(TracingBackendId, DataSourceInstanceID);
 
   // Consumer-side bookkeeping methods.
   void SetupTracingSession(TracingSessionGlobalID,
@@ -104567,17 +106432,33 @@ class TracingMuxerImpl : public TracingMuxer {
     // the config and check if we have it after connection.
     bool start_pending_ = false;
 
+    // Whether this session was already stopped. This will happen in response to
+    // Stop{,Blocking}, but also if the service stops the session for us
+    // automatically (e.g., when there are no data sources).
+    bool stopped_ = false;
+
     // shared_ptr because it's posted across threads. This is to avoid copying
     // it more than once.
     std::shared_ptr<TraceConfig> trace_config_;
+
+    // An internal callback used to implement StartBlocking().
+    std::function<void()> blocking_start_complete_callback_;
 
     // If the API client passes a callback to stop, we should invoke this when
     // OnTracingDisabled() is invoked.
     std::function<void()> stop_complete_callback_;
 
+    // An internal callback used to implement StopBlocking().
+    std::function<void()> blocking_stop_complete_callback_;
+
     // Callback passed to ReadTrace().
     std::function<void(TracingSession::ReadTraceCallbackArgs)>
         read_trace_callback_;
+
+    // The states of all data sources in this tracing session. |true| means the
+    // data source has started tracing.
+    using DataSourceHandle = std::pair<std::string, std::string>;
+    std::map<DataSourceHandle, bool> data_source_states_;
 
     std::unique_ptr<ConsumerEndpoint> service_;  // Keep before last.
     PERFETTO_THREAD_CHECKER(thread_checker_)     // Keep last.
@@ -104591,7 +106472,9 @@ class TracingMuxerImpl : public TracingMuxer {
     ~TracingSessionImpl() override;
     void Setup(const TraceConfig&) override;
     void Start() override;
+    void StartBlocking() override;
     void Stop() override;
+    void StopBlocking() override;
     void ReadTrace(ReadTraceCallback) override;
     void SetOnStopCallback(std::function<void()>) override;
 
@@ -104622,6 +106505,18 @@ class TracingMuxerImpl : public TracingMuxer {
   explicit TracingMuxerImpl(const TracingInitArgs&);
   void Initialize(const TracingInitArgs& args);
   ConsumerImpl* FindConsumer(TracingSessionGlobalID session_id);
+
+  struct FindDataSourceRes {
+    FindDataSourceRes() = default;
+    FindDataSourceRes(DataSourceStaticState* a, DataSourceState* b, uint32_t c)
+        : static_state(a), internal_state(b), instance_idx(c) {}
+    explicit operator bool() const { return !!internal_state; }
+
+    DataSourceStaticState* static_state = nullptr;
+    DataSourceState* internal_state = nullptr;
+    uint32_t instance_idx = 0;
+  };
+  FindDataSourceRes FindDataSource(TracingBackendId, DataSourceInstanceID);
 
   std::unique_ptr<base::TaskRunner> task_runner_;
   std::vector<RegisteredDataSource> data_sources_;
@@ -104711,12 +106606,14 @@ class SystemTracingBackend : public TracingBackend {
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <vector>
 
 // gen_amalgamated expanded: #include "perfetto/base/build_config.h"
 // gen_amalgamated expanded: #include "perfetto/base/logging.h"
 // gen_amalgamated expanded: #include "perfetto/base/task_runner.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
+// gen_amalgamated expanded: #include "perfetto/ext/base/waitable_event.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_packet.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_writer.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/tracing_service.h"
@@ -104731,6 +106628,21 @@ class SystemTracingBackend : public TracingBackend {
 
 namespace perfetto {
 namespace internal {
+
+namespace {
+
+class StopArgsImpl : public DataSourceBase::StopArgs {
+ public:
+  std::function<void()> HandleStopAsynchronously() const override {
+    auto closure = std::move(async_stop_closure);
+    async_stop_closure = std::function<void()>();
+    return closure;
+  }
+
+  mutable std::function<void()> async_stop_closure;
+};
+
+}  // namespace
 
 // ----- Begin of TracingMuxerImpl::ProducerImpl
 TracingMuxerImpl::ProducerImpl::ProducerImpl(TracingMuxerImpl* muxer,
@@ -104777,8 +106689,7 @@ void TracingMuxerImpl::ProducerImpl::StartDataSource(DataSourceInstanceID id,
 
 void TracingMuxerImpl::ProducerImpl::StopDataSource(DataSourceInstanceID id) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
-  muxer_->StopDataSource(backend_id_, id);
-  service_->NotifyDataSourceStopped(id);
+  muxer_->StopDataSource_AsyncBegin(backend_id_, id);
 }
 
 void TracingMuxerImpl::ProducerImpl::Flush(FlushRequestID flush_id,
@@ -104808,6 +106719,8 @@ void TracingMuxerImpl::ConsumerImpl::Initialize(
     std::unique_ptr<ConsumerEndpoint> endpoint) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
   service_ = std::move(endpoint);
+  // Observe data source instance events so we get notified when tracing starts.
+  service_->ObserveEvents(ConsumerEndpoint::kDataSourceInstances);
 }
 
 void TracingMuxerImpl::ConsumerImpl::OnConnect() {
@@ -104837,8 +106750,23 @@ void TracingMuxerImpl::ConsumerImpl::OnDisconnect() {
 
 void TracingMuxerImpl::ConsumerImpl::OnTracingDisabled() {
   PERFETTO_DCHECK_THREAD(thread_checker_);
-  if (stop_complete_callback_)
+  PERFETTO_DCHECK(!stopped_);
+  stopped_ = true;
+  // If we're still waiting for the start event, fire it now. This may happen if
+  // there are no active data sources in the session.
+  if (stop_complete_callback_) {
     muxer_->task_runner_->PostTask(std::move(stop_complete_callback_));
+    stop_complete_callback_ = nullptr;
+  }
+  if (blocking_start_complete_callback_) {
+    muxer_->task_runner_->PostTask(
+        std::move(blocking_start_complete_callback_));
+    blocking_start_complete_callback_ = nullptr;
+  }
+  if (blocking_stop_complete_callback_) {
+    muxer_->task_runner_->PostTask(std::move(blocking_stop_complete_callback_));
+    blocking_stop_complete_callback_ = nullptr;
+  }
 }
 
 void TracingMuxerImpl::ConsumerImpl::OnTraceData(
@@ -104881,12 +106809,37 @@ void TracingMuxerImpl::ConsumerImpl::OnTraceData(
     read_trace_callback_ = nullptr;
 }
 
+void TracingMuxerImpl::ConsumerImpl::OnObservableEvents(
+    const ObservableEvents& events) {
+  if (events.instance_state_changes_size()) {
+    for (const auto& state_change : events.instance_state_changes()) {
+      DataSourceHandle handle{state_change.producer_name(),
+                              state_change.data_source_name()};
+      data_source_states_[handle] =
+          state_change.state() ==
+          ObservableEvents::DataSourceInstanceStateChange::
+              DATA_SOURCE_INSTANCE_STATE_STARTED;
+    }
+    // Data sources are first reported as being stopped before starting, so once
+    // all the data sources we know about have started we can declare tracing
+    // begun.
+    if (blocking_start_complete_callback_) {
+      bool all_data_sources_started = std::all_of(
+          data_source_states_.cbegin(), data_source_states_.cend(),
+          [](std::pair<DataSourceHandle, bool> state) { return state.second; });
+      if (all_data_sources_started) {
+        muxer_->task_runner_->PostTask(
+            std::move(blocking_start_complete_callback_));
+        blocking_start_complete_callback_ = nullptr;
+      }
+    }
+  }
+}
+
 // The callbacks below are not used.
 void TracingMuxerImpl::ConsumerImpl::OnDetach(bool) {}
 void TracingMuxerImpl::ConsumerImpl::OnAttach(bool, const TraceConfig&) {}
 void TracingMuxerImpl::ConsumerImpl::OnTraceStats(bool, const TraceStats&) {}
-void TracingMuxerImpl::ConsumerImpl::OnObservableEvents(
-    const ObservableEvents&) {}
 // ----- End of TracingMuxerImpl::ConsumerImpl
 
 // ----- Begin of TracingMuxerImpl::TracingSessionImpl
@@ -104926,12 +106879,46 @@ void TracingMuxerImpl::TracingSessionImpl::Start() {
       [muxer, session_id] { muxer->StartTracingSession(session_id); });
 }
 
+// Can be called from any thread except the service thread.
+void TracingMuxerImpl::TracingSessionImpl::StartBlocking() {
+  PERFETTO_DCHECK(!muxer_->task_runner_->RunsTasksOnCurrentThread());
+  auto* muxer = muxer_;
+  auto session_id = session_id_;
+  base::WaitableEvent tracing_started;
+  muxer->task_runner_->PostTask([muxer, session_id, &tracing_started] {
+    auto* consumer = muxer->FindConsumer(session_id);
+    PERFETTO_DCHECK(!consumer->blocking_start_complete_callback_);
+    consumer->blocking_start_complete_callback_ = [&] {
+      tracing_started.Notify();
+    };
+    muxer->StartTracingSession(session_id);
+  });
+  tracing_started.Wait();
+}
+
 // Can be called from any thread.
 void TracingMuxerImpl::TracingSessionImpl::Stop() {
   auto* muxer = muxer_;
   auto session_id = session_id_;
   muxer->task_runner_->PostTask(
       [muxer, session_id] { muxer->StopTracingSession(session_id); });
+}
+
+// Can be called from any thread except the service thread.
+void TracingMuxerImpl::TracingSessionImpl::StopBlocking() {
+  PERFETTO_DCHECK(!muxer_->task_runner_->RunsTasksOnCurrentThread());
+  auto* muxer = muxer_;
+  auto session_id = session_id_;
+  base::WaitableEvent tracing_stopped;
+  muxer->task_runner_->PostTask([muxer, session_id, &tracing_stopped] {
+    auto* consumer = muxer->FindConsumer(session_id);
+    PERFETTO_DCHECK(!consumer->blocking_stop_complete_callback_);
+    consumer->blocking_stop_complete_callback_ = [&] {
+      tracing_stopped.Notify();
+    };
+    muxer->StopTracingSession(session_id);
+  });
+  tracing_stopped.Wait();
 }
 
 // Can be called from any thread.
@@ -105099,65 +107086,93 @@ void TracingMuxerImpl::StartDataSource(TracingBackendId backend_id,
                                        DataSourceInstanceID instance_id) {
   PERFETTO_DLOG("Starting data source %" PRIu64, instance_id);
   PERFETTO_DCHECK_THREAD(thread_checker_);
-  for (const auto& rds : data_sources_) {
-    DataSourceStaticState& static_state = *rds.static_state;
-    for (uint32_t i = 0; i < kMaxDataSourceInstances; i++) {
-      auto* internal_state = static_state.TryGet(i);
-      if (!internal_state)
-        continue;
 
-      if (internal_state->backend_id != backend_id ||
-          internal_state->data_source_instance_id != instance_id) {
-        continue;
-      }
-
-      std::lock_guard<std::mutex> guard(internal_state->lock);
-      internal_state->started = true;
-      internal_state->data_source->OnStart(DataSourceBase::StartArgs{});
-      return;
-    }
+  auto ds = FindDataSource(backend_id, instance_id);
+  if (!ds) {
+    PERFETTO_ELOG("Could not find data source to start");
+    return;
   }
-  PERFETTO_ELOG("Could not find data source to start");
+
+  std::lock_guard<std::mutex> guard(ds.internal_state->lock);
+  ds.internal_state->trace_lambda_enabled = true;
+  ds.internal_state->data_source->OnStart(DataSourceBase::StartArgs{});
 }
 
 // Called by the service of one of the backends.
-void TracingMuxerImpl::StopDataSource(TracingBackendId backend_id,
-                                      DataSourceInstanceID instance_id) {
+void TracingMuxerImpl::StopDataSource_AsyncBegin(
+    TracingBackendId backend_id,
+    DataSourceInstanceID instance_id) {
   PERFETTO_DLOG("Stopping data source %" PRIu64, instance_id);
   PERFETTO_DCHECK_THREAD(thread_checker_);
-  for (const auto& rds : data_sources_) {
-    DataSourceStaticState& static_state = *rds.static_state;
-    for (uint32_t i = 0; i < kMaxDataSourceInstances; i++) {
-      auto* internal_state = static_state.TryGet(i);
-      if (!internal_state)
-        continue;
 
-      if (internal_state->backend_id != backend_id ||
-          internal_state->data_source_instance_id != instance_id) {
-        continue;
-      }
-
-      static_state.valid_instances.fetch_and(~(1 << i),
-                                             std::memory_order_acq_rel);
-
-      // Take the mutex to prevent that the data source is in the middle of
-      // a Trace() execution where it called GetDataSourceLocked() while we
-      // destroy it.
-      {
-        std::lock_guard<std::mutex> guard(internal_state->lock);
-        internal_state->started = false;
-        internal_state->data_source->OnStop(DataSourceBase::StopArgs{});
-        internal_state->data_source.reset();
-      }
-
-      // The other fields of internal_state are deliberately *not* cleared.
-      // See races-related comments of DataSource::Trace().
-
-      TracingMuxer::generation_++;
-      return;
-    }
+  auto ds = FindDataSource(backend_id, instance_id);
+  if (!ds) {
+    PERFETTO_ELOG("Could not find data source to stop");
+    return;
   }
-  PERFETTO_ELOG("Could not find data source to stop");
+
+  StopArgsImpl stop_args{};
+  stop_args.async_stop_closure = [this, backend_id, instance_id] {
+    // TracingMuxerImpl is long lived, capturing |this| is okay.
+    // The notification closure can be moved out of the StopArgs by the
+    // embedder to handle stop asynchronously. The embedder might then
+    // call the closure on a different thread than the current one, hence
+    // this nested PostTask().
+    task_runner_->PostTask([this, backend_id, instance_id] {
+      StopDataSource_AsyncEnd(backend_id, instance_id);
+    });
+  };
+
+  {
+    std::lock_guard<std::mutex> guard(ds.internal_state->lock);
+    ds.internal_state->data_source->OnStop(stop_args);
+  }
+
+  // If the embedder hasn't called StopArgs.HandleStopAsynchronously() run the
+  // async closure here. In theory we could avoid the PostTask and call
+  // straight into CompleteDataSourceAsyncStop(). We keep that to reduce
+  // divergencies between the deferred-stop vs non-deferred-stop code paths.
+  if (stop_args.async_stop_closure)
+    std::move(stop_args.async_stop_closure)();
+}
+
+void TracingMuxerImpl::StopDataSource_AsyncEnd(
+    TracingBackendId backend_id,
+    DataSourceInstanceID instance_id) {
+  PERFETTO_DLOG("Ending async stop of data source %" PRIu64, instance_id);
+  PERFETTO_DCHECK_THREAD(thread_checker_);
+
+  auto ds = FindDataSource(backend_id, instance_id);
+  if (!ds) {
+    PERFETTO_ELOG(
+        "Async stop of data source %" PRIu64
+        " failed. This might be due to calling the async_stop_closure twice.",
+        instance_id);
+    return;
+  }
+
+  const uint32_t mask = ~(1 << ds.instance_idx);
+  ds.static_state->valid_instances.fetch_and(mask, std::memory_order_acq_rel);
+
+  // Take the mutex to prevent that the data source is in the middle of
+  // a Trace() execution where it called GetDataSourceLocked() while we
+  // destroy it.
+  {
+    std::lock_guard<std::mutex> guard(ds.internal_state->lock);
+    ds.internal_state->trace_lambda_enabled = false;
+    ds.internal_state->data_source.reset();
+  }
+
+  // The other fields of internal_state are deliberately *not* cleared.
+  // See races-related comments of DataSource::Trace().
+
+  TracingMuxer::generation_++;
+
+  // |backends_| is append-only, Backend instances are always valid.
+  PERFETTO_CHECK(backend_id < backends_.size());
+  ProducerImpl* producer = backends_[backend_id].producer.get();
+  if (producer && producer->connected_)
+    producer->service_->NotifyDataSourceStopped(instance_id);
 }
 
 void TracingMuxerImpl::DestroyStoppedTraceWritersForCurrentThread() {
@@ -105272,7 +107287,18 @@ void TracingMuxerImpl::StopTracingSession(TracingSessionGlobalID session_id) {
     return;
   }
 
-  consumer->service_->DisableTracing();
+  // If the session was already stopped (e.g., it failed to start), don't try
+  // stopping again.
+  if (consumer->stopped_) {
+    if (consumer->blocking_stop_complete_callback_) {
+      task_runner_->PostTask(
+          std::move(consumer->blocking_stop_complete_callback_));
+      consumer->blocking_stop_complete_callback_ = nullptr;
+    }
+  } else {
+    consumer->service_->DisableTracing();
+  }
+
   consumer->trace_config_.reset();
 }
 
@@ -105311,6 +107337,23 @@ TracingMuxerImpl::ConsumerImpl* TracingMuxerImpl::FindConsumer(
     }
   }
   return nullptr;
+}
+
+TracingMuxerImpl::FindDataSourceRes TracingMuxerImpl::FindDataSource(
+    TracingBackendId backend_id,
+    DataSourceInstanceID instance_id) {
+  PERFETTO_DCHECK_THREAD(thread_checker_);
+  for (const auto& rds : data_sources_) {
+    DataSourceStaticState* static_state = rds.static_state;
+    for (uint32_t i = 0; i < kMaxDataSourceInstances; i++) {
+      auto* internal_state = static_state->TryGet(i);
+      if (internal_state && internal_state->backend_id == backend_id &&
+          internal_state->data_source_instance_id == instance_id) {
+        return FindDataSourceRes(static_state, internal_state, i);
+      }
+    }
+  }
+  return FindDataSourceRes();
 }
 
 // Can be called from any thread.
@@ -105426,6 +107469,8 @@ namespace perfetto {
 
 // static
 void Tracing::Initialize(const TracingInitArgs& args) {
+  // Make sure the headers and implementation files agree on the build config.
+  PERFETTO_CHECK(args.dcheck_is_on_ == PERFETTO_DCHECK_IS_ON());
   internal::TracingMuxerImpl::InitializeInstance(args);
 }
 
