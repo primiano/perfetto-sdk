@@ -369,6 +369,9 @@ class PERFETTO_EXPORT DataSourceConfig {
   uint32_t trace_duration_ms() const { return trace_duration_ms_; }
   void set_trace_duration_ms(uint32_t value) { trace_duration_ms_ = value; }
 
+  uint32_t stop_timeout_ms() const { return stop_timeout_ms_; }
+  void set_stop_timeout_ms(uint32_t value) { stop_timeout_ms_ = value; }
+
   bool enable_extra_guardrails() const { return enable_extra_guardrails_; }
   void set_enable_extra_guardrails(bool value) {
     enable_extra_guardrails_ = value;
@@ -445,6 +448,7 @@ class PERFETTO_EXPORT DataSourceConfig {
   std::string name_{};
   uint32_t target_buffer_{};
   uint32_t trace_duration_ms_{};
+  uint32_t stop_timeout_ms_{};
   bool enable_extra_guardrails_{};
   uint64_t tracing_session_id_{};
   std::string ftrace_config_;         // [lazy=true]
@@ -1224,6 +1228,12 @@ class PERFETTO_EXPORT TraceConfig {
     return incident_report_config_.get();
   }
 
+  const std::string& trace_uuid() const { return trace_uuid_; }
+  void set_trace_uuid(const std::string& value) { trace_uuid_ = value; }
+  void set_trace_uuid(const void* p, size_t s) {
+    trace_uuid_.assign(reinterpret_cast<const char*>(p), s);
+  }
+
  private:
   std::vector<BufferConfig> buffers_;
   std::vector<DataSource> data_sources_;
@@ -1250,6 +1260,7 @@ class PERFETTO_EXPORT TraceConfig {
   std::string unique_session_name_{};
   CompressionType compression_type_{};
   ::perfetto::base::CopyablePtr<IncidentReportConfig> incident_report_config_;
+  std::string trace_uuid_{};
 
   // Allows to preserve unknown protobuf fields for compatibility
   // with future versions of .proto files.
@@ -2714,6 +2725,17 @@ class TypedProtoDecoder : public TypedProtoDecoderBase {
     return fields_[FIELD_ID];
   }
 
+  TypedProtoDecoder(TypedProtoDecoder&& other) noexcept
+      : TypedProtoDecoderBase(std::move(other)) {
+    // If the moved-from decoder was using on-stack storage, we need to update
+    // our pointer to point to this decoder's on-stack storage.
+    if (fields_ == other.on_stack_storage_) {
+      fields_ = on_stack_storage_;
+      memcpy(on_stack_storage_, other.on_stack_storage_,
+             sizeof(on_stack_storage_));
+    }
+  }
+
  private:
   // In the case of non-repeated fields, this constant defines the highest field
   // id we are able to decode. This is to limit the on-stack storage.
@@ -2759,6 +2781,8 @@ class FtraceEventBundle;
 class FtraceStats;
 class GpuCounterEvent;
 class GpuRenderStageEvent;
+class GraphicsFrameEvent;
+class HeapGraph;
 class InodeFileMap;
 class InternedData;
 class PackagesList;
@@ -2834,6 +2858,10 @@ class TracePacket_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID
   ::protozero::ConstBytes gpu_render_stage_event() const { return at<53>().as_bytes(); }
   bool has_streaming_profile_packet() const { return at<54>().valid(); }
   ::protozero::ConstBytes streaming_profile_packet() const { return at<54>().as_bytes(); }
+  bool has_heap_graph() const { return at<56>().valid(); }
+  ::protozero::ConstBytes heap_graph() const { return at<56>().as_bytes(); }
+  bool has_graphics_frame_event() const { return at<57>().valid(); }
+  ::protozero::ConstBytes graphics_frame_event() const { return at<57>().as_bytes(); }
   bool has_profiled_frame_symbols() const { return at<55>().valid(); }
   ::protozero::ConstBytes profiled_frame_symbols() const { return at<55>().as_bytes(); }
   bool has_process_descriptor() const { return at<43>().valid(); }
@@ -2887,6 +2915,8 @@ class TracePacket : public ::protozero::Message {
     kGpuCounterEventFieldNumber = 52,
     kGpuRenderStageEventFieldNumber = 53,
     kStreamingProfilePacketFieldNumber = 54,
+    kHeapGraphFieldNumber = 56,
+    kGraphicsFrameEventFieldNumber = 57,
     kProfiledFrameSymbolsFieldNumber = 55,
     kProcessDescriptorFieldNumber = 43,
     kThreadDescriptorFieldNumber = 44,
@@ -2996,6 +3026,14 @@ class TracePacket : public ::protozero::Message {
 
   template <typename T = StreamingProfilePacket> T* set_streaming_profile_packet() {
     return BeginNestedMessage<T>(54);
+  }
+
+  template <typename T = HeapGraph> T* set_heap_graph() {
+    return BeginNestedMessage<T>(56);
+  }
+
+  template <typename T = GraphicsFrameEvent> T* set_graphics_frame_event() {
+    return BeginNestedMessage<T>(57);
   }
 
   template <typename T = ProfiledFrameSymbols> T* set_profiled_frame_symbols() {
@@ -3217,7 +3255,7 @@ struct DataSourceState {
   // This is to prevent that accessing the data source on an arbitrary embedder
   // thread races with the internal IPC thread destroying the data source
   // because of a end-of-tracing notification from the service.
-  std::mutex lock;
+  std::recursive_mutex lock;
   std::unique_ptr<DataSourceBase> data_source;
 };
 
@@ -3230,7 +3268,8 @@ struct DataSourceStateStorage {
 
 // Per-DataSource-type global state.
 struct DataSourceStaticState {
-  uint32_t index = 0;  // Unique ID, assigned at registration time.
+  uint32_t index =
+      kMaxDataSources;  // Unique ID, assigned at registration time.
 
   // A bitmap that tells about the validity of each |instances| entry. When the
   // i-th bit of the bitmap it's set, instances[i] is valid.
@@ -3592,7 +3631,7 @@ namespace perfetto {
 template <typename T>
 class LockedHandle {
  public:
-  LockedHandle(std::mutex* mutex, T* obj) : lock_(*mutex), obj_(obj) {}
+  LockedHandle(std::recursive_mutex* mtx, T* obj) : lock_(*mtx), obj_(obj) {}
   LockedHandle() = default;  // For the invalid case.
   LockedHandle(LockedHandle&&) = default;
   LockedHandle& operator=(LockedHandle&&) = default;
@@ -3608,7 +3647,7 @@ class LockedHandle {
   T& operator*() { return *(this->operator->()); }
 
  private:
-  std::unique_lock<std::mutex> lock_;
+  std::unique_lock<std::recursive_mutex> lock_;
   T* obj_ = nullptr;
 };
 
@@ -4046,8 +4085,11 @@ class PERFETTO_EXPORT TracingSession {
   virtual ~TracingSession();
 
   // Configure the session passing the trace config.
+  // If a writable file handle is given through |fd|, the trace will
+  // automatically written to that file. Otherwise you should call ReadTrace()
+  // to retrieve the trace data. This call does not take ownership of |fd|.
   // TODO(primiano): add an error callback.
-  virtual void Setup(const TraceConfig&) = 0;
+  virtual void Setup(const TraceConfig&, int fd = -1) = 0;
 
   // Enable tracing asynchronously.
   virtual void Start() = 0;
@@ -5052,6 +5094,17 @@ class TypedProtoDecoder : public TypedProtoDecoderBase {
   inline const Field& at() const {
     static_assert(FIELD_ID <= MAX_FIELD_ID, "FIELD_ID > MAX_FIELD_ID");
     return fields_[FIELD_ID];
+  }
+
+  TypedProtoDecoder(TypedProtoDecoder&& other) noexcept
+      : TypedProtoDecoderBase(std::move(other)) {
+    // If the moved-from decoder was using on-stack storage, we need to update
+    // our pointer to point to this decoder's on-stack storage.
+    if (fields_ == other.on_stack_storage_) {
+      fields_ = on_stack_storage_;
+      memcpy(on_stack_storage_, other.on_stack_storage_,
+             sizeof(on_stack_storage_));
+    }
   }
 
  private:
@@ -7195,7 +7248,7 @@ namespace pbzero {
 
 class TraceStats_BufferStats;
 
-class TraceStats_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/9, /*HAS_REPEATED_FIELDS=*/true> {
+class TraceStats_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/10, /*HAS_REPEATED_FIELDS=*/true> {
  public:
   TraceStats_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit TraceStats_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -7218,6 +7271,8 @@ class TraceStats_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=
   uint64_t chunks_discarded() const { return at<8>().as_uint64(); }
   bool has_patches_discarded() const { return at<9>().valid(); }
   uint64_t patches_discarded() const { return at<9>().as_uint64(); }
+  bool has_invalid_packets() const { return at<10>().valid(); }
+  uint64_t invalid_packets() const { return at<10>().as_uint64(); }
 };
 
 class TraceStats : public ::protozero::Message {
@@ -7233,6 +7288,7 @@ class TraceStats : public ::protozero::Message {
     kTotalBuffersFieldNumber = 7,
     kChunksDiscardedFieldNumber = 8,
     kPatchesDiscardedFieldNumber = 9,
+    kInvalidPacketsFieldNumber = 10,
   };
   using BufferStats = ::perfetto::protos::pbzero::TraceStats_BufferStats;
   template <typename T = TraceStats_BufferStats> T* add_buffer_stats() {
@@ -7263,9 +7319,12 @@ class TraceStats : public ::protozero::Message {
   void set_patches_discarded(uint64_t value) {
     AppendVarInt(9, value);
   }
+  void set_invalid_packets(uint64_t value) {
+    AppendVarInt(10, value);
+  }
 };
 
-class TraceStats_BufferStats_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/18, /*HAS_REPEATED_FIELDS=*/false> {
+class TraceStats_BufferStats_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/19, /*HAS_REPEATED_FIELDS=*/false> {
  public:
   TraceStats_BufferStats_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit TraceStats_BufferStats_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -7306,6 +7365,8 @@ class TraceStats_BufferStats_Decoder : public ::protozero::TypedProtoDecoder</*M
   uint64_t readaheads_failed() const { return at<8>().as_uint64(); }
   bool has_abi_violations() const { return at<9>().valid(); }
   uint64_t abi_violations() const { return at<9>().as_uint64(); }
+  bool has_trace_writer_packet_loss() const { return at<19>().valid(); }
+  uint64_t trace_writer_packet_loss() const { return at<19>().as_uint64(); }
 };
 
 class TraceStats_BufferStats : public ::protozero::Message {
@@ -7330,6 +7391,7 @@ class TraceStats_BufferStats : public ::protozero::Message {
     kReadaheadsSucceededFieldNumber = 7,
     kReadaheadsFailedFieldNumber = 8,
     kAbiViolationsFieldNumber = 9,
+    kTraceWriterPacketLossFieldNumber = 19,
   };
   void set_buffer_size(uint64_t value) {
     AppendVarInt(12, value);
@@ -7384,6 +7446,9 @@ class TraceStats_BufferStats : public ::protozero::Message {
   }
   void set_abi_violations(uint64_t value) {
     AppendVarInt(9, value);
+  }
+  void set_trace_writer_packet_loss(uint64_t value) {
+    AppendVarInt(19, value);
   }
 };
 
@@ -7588,6 +7653,8 @@ class DataSourceConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIE
   uint32_t target_buffer() const { return at<2>().as_uint32(); }
   bool has_trace_duration_ms() const { return at<3>().valid(); }
   uint32_t trace_duration_ms() const { return at<3>().as_uint32(); }
+  bool has_stop_timeout_ms() const { return at<7>().valid(); }
+  uint32_t stop_timeout_ms() const { return at<7>().as_uint32(); }
   bool has_enable_extra_guardrails() const { return at<6>().valid(); }
   bool enable_extra_guardrails() const { return at<6>().as_bool(); }
   bool has_tracing_session_id() const { return at<4>().valid(); }
@@ -7623,6 +7690,7 @@ class DataSourceConfig : public ::protozero::Message {
     kNameFieldNumber = 1,
     kTargetBufferFieldNumber = 2,
     kTraceDurationMsFieldNumber = 3,
+    kStopTimeoutMsFieldNumber = 7,
     kEnableExtraGuardrailsFieldNumber = 6,
     kTracingSessionIdFieldNumber = 4,
     kFtraceConfigFieldNumber = 100,
@@ -7651,6 +7719,9 @@ class DataSourceConfig : public ::protozero::Message {
   }
   void set_trace_duration_ms(uint32_t value) {
     AppendVarInt(3, value);
+  }
+  void set_stop_timeout_ms(uint32_t value) {
+    AppendVarInt(7, value);
   }
   void set_enable_extra_guardrails(bool value) {
     AppendTinyVarInt(6, value);
@@ -8589,7 +8660,7 @@ enum TraceConfig_BufferConfig_FillPolicy : int32_t {
 const TraceConfig_BufferConfig_FillPolicy TraceConfig_BufferConfig_FillPolicy_MIN = TraceConfig_BufferConfig_FillPolicy_UNSPECIFIED;
 const TraceConfig_BufferConfig_FillPolicy TraceConfig_BufferConfig_FillPolicy_MAX = TraceConfig_BufferConfig_FillPolicy_DISCARD;
 
-class TraceConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/25, /*HAS_REPEATED_FIELDS=*/true> {
+class TraceConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/26, /*HAS_REPEATED_FIELDS=*/true> {
  public:
   TraceConfig_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit TraceConfig_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -8642,6 +8713,8 @@ class TraceConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID
   int32_t compression_type() const { return at<24>().as_int32(); }
   bool has_incident_report_config() const { return at<25>().valid(); }
   ::protozero::ConstBytes incident_report_config() const { return at<25>().as_bytes(); }
+  bool has_trace_uuid() const { return at<26>().valid(); }
+  ::protozero::ConstBytes trace_uuid() const { return at<26>().as_bytes(); }
 };
 
 class TraceConfig : public ::protozero::Message {
@@ -8672,6 +8745,7 @@ class TraceConfig : public ::protozero::Message {
     kUniqueSessionNameFieldNumber = 22,
     kCompressionTypeFieldNumber = 24,
     kIncidentReportConfigFieldNumber = 25,
+    kTraceUuidFieldNumber = 26,
   };
   using BufferConfig = ::perfetto::protos::pbzero::TraceConfig_BufferConfig;
   using DataSource = ::perfetto::protos::pbzero::TraceConfig_DataSource;
@@ -8780,6 +8854,9 @@ class TraceConfig : public ::protozero::Message {
     return BeginNestedMessage<T>(25);
   }
 
+  void set_trace_uuid(const uint8_t* data, size_t size) {
+    AppendBytes(26, data, size);
+  }
 };
 
 class TraceConfig_IncidentReportConfig_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/4, /*HAS_REPEATED_FIELDS=*/false> {
@@ -9461,6 +9538,8 @@ class FtraceEventBundle;
 class FtraceStats;
 class GpuCounterEvent;
 class GpuRenderStageEvent;
+class GraphicsFrameEvent;
+class HeapGraph;
 class InodeFileMap;
 class InternedData;
 class PackagesList;
@@ -9536,6 +9615,10 @@ class TracePacket_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID
   ::protozero::ConstBytes gpu_render_stage_event() const { return at<53>().as_bytes(); }
   bool has_streaming_profile_packet() const { return at<54>().valid(); }
   ::protozero::ConstBytes streaming_profile_packet() const { return at<54>().as_bytes(); }
+  bool has_heap_graph() const { return at<56>().valid(); }
+  ::protozero::ConstBytes heap_graph() const { return at<56>().as_bytes(); }
+  bool has_graphics_frame_event() const { return at<57>().valid(); }
+  ::protozero::ConstBytes graphics_frame_event() const { return at<57>().as_bytes(); }
   bool has_profiled_frame_symbols() const { return at<55>().valid(); }
   ::protozero::ConstBytes profiled_frame_symbols() const { return at<55>().as_bytes(); }
   bool has_process_descriptor() const { return at<43>().valid(); }
@@ -9589,6 +9672,8 @@ class TracePacket : public ::protozero::Message {
     kGpuCounterEventFieldNumber = 52,
     kGpuRenderStageEventFieldNumber = 53,
     kStreamingProfilePacketFieldNumber = 54,
+    kHeapGraphFieldNumber = 56,
+    kGraphicsFrameEventFieldNumber = 57,
     kProfiledFrameSymbolsFieldNumber = 55,
     kProcessDescriptorFieldNumber = 43,
     kThreadDescriptorFieldNumber = 44,
@@ -9698,6 +9783,14 @@ class TracePacket : public ::protozero::Message {
 
   template <typename T = StreamingProfilePacket> T* set_streaming_profile_packet() {
     return BeginNestedMessage<T>(54);
+  }
+
+  template <typename T = HeapGraph> T* set_heap_graph() {
+    return BeginNestedMessage<T>(56);
+  }
+
+  template <typename T = GraphicsFrameEvent> T* set_graphics_frame_event() {
+    return BeginNestedMessage<T>(57);
   }
 
   template <typename T = ProfiledFrameSymbols> T* set_profiled_frame_symbols() {
@@ -10115,9 +10208,10 @@ class InternedString;
 class LegacyEventName;
 class LogMessageBody;
 class Mapping;
+class ProfiledFrameSymbols;
 class SourceLocation;
 
-class InternedData_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/20, /*HAS_REPEATED_FIELDS=*/true> {
+class InternedData_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/21, /*HAS_REPEATED_FIELDS=*/true> {
  public:
   InternedData_Decoder(const uint8_t* data, size_t len) : TypedProtoDecoder(data, len) {}
   explicit InternedData_Decoder(const std::string& raw) : TypedProtoDecoder(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()) {}
@@ -10136,8 +10230,12 @@ class InternedData_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_I
   ::protozero::RepeatedFieldIterator build_ids() const { return GetRepeated(16); }
   bool has_mapping_paths() const { return at<17>().valid(); }
   ::protozero::RepeatedFieldIterator mapping_paths() const { return GetRepeated(17); }
+  bool has_source_paths() const { return at<18>().valid(); }
+  ::protozero::RepeatedFieldIterator source_paths() const { return GetRepeated(18); }
   bool has_function_names() const { return at<5>().valid(); }
   ::protozero::RepeatedFieldIterator function_names() const { return GetRepeated(5); }
+  bool has_profiled_frame_symbols() const { return at<21>().valid(); }
+  ::protozero::RepeatedFieldIterator profiled_frame_symbols() const { return GetRepeated(21); }
   bool has_mappings() const { return at<19>().valid(); }
   ::protozero::RepeatedFieldIterator mappings() const { return GetRepeated(19); }
   bool has_frames() const { return at<6>().valid(); }
@@ -10157,7 +10255,9 @@ class InternedData : public ::protozero::Message {
     kLogMessageBodyFieldNumber = 20,
     kBuildIdsFieldNumber = 16,
     kMappingPathsFieldNumber = 17,
+    kSourcePathsFieldNumber = 18,
     kFunctionNamesFieldNumber = 5,
+    kProfiledFrameSymbolsFieldNumber = 21,
     kMappingsFieldNumber = 19,
     kFramesFieldNumber = 6,
     kCallstacksFieldNumber = 7,
@@ -10190,8 +10290,16 @@ class InternedData : public ::protozero::Message {
     return BeginNestedMessage<T>(17);
   }
 
+  template <typename T = InternedString> T* add_source_paths() {
+    return BeginNestedMessage<T>(18);
+  }
+
   template <typename T = InternedString> T* add_function_names() {
     return BeginNestedMessage<T>(5);
+  }
+
+  template <typename T = ProfiledFrameSymbols> T* add_profiled_frame_symbols() {
+    return BeginNestedMessage<T>(21);
   }
 
   template <typename T = Mapping> T* add_mappings() {
@@ -10863,6 +10971,16 @@ class TaskExecution;
 class TrackEvent_LegacyEvent;
 enum TrackEvent_LegacyEvent_FlowDirection : int32_t;
 enum TrackEvent_LegacyEvent_InstantEventScope : int32_t;
+enum TrackEvent_Type : int32_t;
+
+enum TrackEvent_Type : int32_t {
+  TrackEvent_Type_TYPE_UNSPECIFIED = 0,
+  TrackEvent_Type_TYPE_SLICE_BEGIN = 1,
+  TrackEvent_Type_TYPE_SLICE_END = 2,
+};
+
+const TrackEvent_Type TrackEvent_Type_MIN = TrackEvent_Type_TYPE_UNSPECIFIED;
+const TrackEvent_Type TrackEvent_Type_MAX = TrackEvent_Type_TYPE_SLICE_END;
 
 enum TrackEvent_LegacyEvent_FlowDirection : int32_t {
   TrackEvent_LegacyEvent_FlowDirection_FLOW_UNSPECIFIED = 0,
@@ -10965,6 +11083,8 @@ class TrackEvent_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=
   int64_t thread_instruction_count_absolute() const { return at<20>().as_int64(); }
   bool has_category_iids() const { return at<3>().valid(); }
   ::protozero::RepeatedFieldIterator category_iids() const { return GetRepeated(3); }
+  bool has_type() const { return at<9>().valid(); }
+  int32_t type() const { return at<9>().as_int32(); }
   bool has_debug_annotations() const { return at<4>().valid(); }
   ::protozero::RepeatedFieldIterator debug_annotations() const { return GetRepeated(4); }
   bool has_task_execution() const { return at<5>().valid(); }
@@ -10986,12 +11106,17 @@ class TrackEvent : public ::protozero::Message {
     kThreadInstructionCountDeltaFieldNumber = 8,
     kThreadInstructionCountAbsoluteFieldNumber = 20,
     kCategoryIidsFieldNumber = 3,
+    kTypeFieldNumber = 9,
     kDebugAnnotationsFieldNumber = 4,
     kTaskExecutionFieldNumber = 5,
     kLogMessageFieldNumber = 21,
     kLegacyEventFieldNumber = 6,
   };
   using LegacyEvent = ::perfetto::protos::pbzero::TrackEvent_LegacyEvent;
+  using Type = ::perfetto::protos::pbzero::TrackEvent_Type;
+  static const Type TYPE_UNSPECIFIED = TrackEvent_Type_TYPE_UNSPECIFIED;
+  static const Type TYPE_SLICE_BEGIN = TrackEvent_Type_TYPE_SLICE_BEGIN;
+  static const Type TYPE_SLICE_END = TrackEvent_Type_TYPE_SLICE_END;
   void set_timestamp_delta_us(int64_t value) {
     AppendVarInt(1, value);
   }
@@ -11012,6 +11137,9 @@ class TrackEvent : public ::protozero::Message {
   }
   void add_category_iids(uint64_t value) {
     AppendVarInt(3, value);
+  }
+  void set_type(::perfetto::protos::pbzero::TrackEvent_Type value) {
+    AppendTinyVarInt(9, value);
   }
   template <typename T = DebugAnnotation> T* add_debug_annotations() {
     return BeginNestedMessage<T>(4);
