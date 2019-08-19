@@ -2342,16 +2342,18 @@ class PERFETTO_EXPORT ScatteredHeapBuffer
 };
 
 // Helper function to create heap-based protozero messages in one line.
-// This is a convenience wrapper, mostly for tests, to avoid having to do:
-//   MyMessage msg;
-//   ScatteredHeapBuffer shb;
-//   ScatteredStreamWriter writer(&shb);
+// Useful when manually serializing a protozero message (primarily in
+// tests/utilities). So instead of the following:
+//   protozero::MyMessage msg;
+//   protozero::ScatteredHeapBuffer shb;
+//   protozero::ScatteredStreamWriter writer(&shb);
 //   shb.set_writer(&writer);
-//   msg.Reset(&shb);
-// Just to get an easily serializable message. Instead this allows simply:
-//   HeapBuffered<MyMessage> msg;
+//   msg.Reset(&writer);
+//   ...
+// You can write:
+//   protozero::HeapBuffered<protozero::MyMessage> msg;
 //   msg->set_stuff(...);
-//   msg->SerializeAsString();
+//   msg.SerializeAsString();
 template <typename T = ::protozero::Message>
 class HeapBuffered {
  public:
@@ -2798,6 +2800,8 @@ uint8_t* ScatteredStreamWriter::ReserveBytes(size_t size) {
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/trigger.pbzero.cc
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/system_info.pbzero.cc
+// Intentionally empty
+// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/trace_packet_defaults.pbzero.cc
 // Intentionally empty
 // gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/test_event.pbzero.cc
 // Intentionally empty
@@ -3923,8 +3927,12 @@ void RingBuffer::Reset() {
   static_assert(PERFETTO_IS_TRIVIALLY_CONSTRUCTIBLE(Record) &&
                     std::is_trivially_destructible<Record>::value,
                 "Record must be trivial");
-  memset(&records_[0], 0, sizeof(records_));
-  memset(&bankruptcy_record_, 0, sizeof(bankruptcy_record_));
+  // Cast pointers to void* to suppress "-Wclass-memaccess" from gcc, which
+  // triggers as we're doing a raw memory set for a class (Record) that doesn't
+  // have a copy assignment operator (due to the atomic |type_and_id|).
+  memset(static_cast<void*>(records_.data()), 0, sizeof(records_));
+  memset(static_cast<void*>(&bankruptcy_record_), 0,
+         sizeof(bankruptcy_record_));
   wr_index_ = 0;
   rd_index_ = 0;
   has_overruns_ = false;
@@ -82014,21 +82022,22 @@ void protobuf_ShutdownFile_perfetto_2ftrace_2fclock_5fsnapshot_2eproto();
 class ClockSnapshot;
 class ClockSnapshot_Clock;
 
-enum ClockSnapshot_Clock_Type {
-  ClockSnapshot_Clock_Type_UNKNOWN = 0,
-  ClockSnapshot_Clock_Type_REALTIME = 1,
-  ClockSnapshot_Clock_Type_REALTIME_COARSE = 2,
-  ClockSnapshot_Clock_Type_MONOTONIC = 3,
-  ClockSnapshot_Clock_Type_MONOTONIC_COARSE = 4,
-  ClockSnapshot_Clock_Type_MONOTONIC_RAW = 5,
-  ClockSnapshot_Clock_Type_BOOTTIME = 6,
-  ClockSnapshot_Clock_Type_PROCESS_CPUTIME = 7,
-  ClockSnapshot_Clock_Type_THREAD_CPUTIME = 8
+enum ClockSnapshot_Clock_BuiltinClocks {
+  ClockSnapshot_Clock_BuiltinClocks_UNKNOWN = 0,
+  ClockSnapshot_Clock_BuiltinClocks_REALTIME = 1,
+  ClockSnapshot_Clock_BuiltinClocks_REALTIME_COARSE = 2,
+  ClockSnapshot_Clock_BuiltinClocks_MONOTONIC = 3,
+  ClockSnapshot_Clock_BuiltinClocks_MONOTONIC_COARSE = 4,
+  ClockSnapshot_Clock_BuiltinClocks_MONOTONIC_RAW = 5,
+  ClockSnapshot_Clock_BuiltinClocks_BOOTTIME = 6,
+  ClockSnapshot_Clock_BuiltinClocks_PROCESS_CPUTIME = 7,
+  ClockSnapshot_Clock_BuiltinClocks_THREAD_CPUTIME = 8,
+  ClockSnapshot_Clock_BuiltinClocks_BUILTIN_CLOCK_MAX_ID = 63
 };
-bool ClockSnapshot_Clock_Type_IsValid(int value);
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock_Type_Type_MIN = ClockSnapshot_Clock_Type_UNKNOWN;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock_Type_Type_MAX = ClockSnapshot_Clock_Type_THREAD_CPUTIME;
-const int ClockSnapshot_Clock_Type_Type_ARRAYSIZE = ClockSnapshot_Clock_Type_Type_MAX + 1;
+bool ClockSnapshot_Clock_BuiltinClocks_IsValid(int value);
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_MIN = ClockSnapshot_Clock_BuiltinClocks_UNKNOWN;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_MAX = ClockSnapshot_Clock_BuiltinClocks_BUILTIN_CLOCK_MAX_ID;
+const int ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_ARRAYSIZE = ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_MAX + 1;
 
 // ===================================================================
 
@@ -82104,43 +82113,45 @@ class ClockSnapshot_Clock : public ::google::protobuf::MessageLite {
 
   // nested types ----------------------------------------------------
 
-  typedef ClockSnapshot_Clock_Type Type;
-  static const Type UNKNOWN =
-    ClockSnapshot_Clock_Type_UNKNOWN;
-  static const Type REALTIME =
-    ClockSnapshot_Clock_Type_REALTIME;
-  static const Type REALTIME_COARSE =
-    ClockSnapshot_Clock_Type_REALTIME_COARSE;
-  static const Type MONOTONIC =
-    ClockSnapshot_Clock_Type_MONOTONIC;
-  static const Type MONOTONIC_COARSE =
-    ClockSnapshot_Clock_Type_MONOTONIC_COARSE;
-  static const Type MONOTONIC_RAW =
-    ClockSnapshot_Clock_Type_MONOTONIC_RAW;
-  static const Type BOOTTIME =
-    ClockSnapshot_Clock_Type_BOOTTIME;
-  static const Type PROCESS_CPUTIME =
-    ClockSnapshot_Clock_Type_PROCESS_CPUTIME;
-  static const Type THREAD_CPUTIME =
-    ClockSnapshot_Clock_Type_THREAD_CPUTIME;
-  static inline bool Type_IsValid(int value) {
-    return ClockSnapshot_Clock_Type_IsValid(value);
+  typedef ClockSnapshot_Clock_BuiltinClocks BuiltinClocks;
+  static const BuiltinClocks UNKNOWN =
+    ClockSnapshot_Clock_BuiltinClocks_UNKNOWN;
+  static const BuiltinClocks REALTIME =
+    ClockSnapshot_Clock_BuiltinClocks_REALTIME;
+  static const BuiltinClocks REALTIME_COARSE =
+    ClockSnapshot_Clock_BuiltinClocks_REALTIME_COARSE;
+  static const BuiltinClocks MONOTONIC =
+    ClockSnapshot_Clock_BuiltinClocks_MONOTONIC;
+  static const BuiltinClocks MONOTONIC_COARSE =
+    ClockSnapshot_Clock_BuiltinClocks_MONOTONIC_COARSE;
+  static const BuiltinClocks MONOTONIC_RAW =
+    ClockSnapshot_Clock_BuiltinClocks_MONOTONIC_RAW;
+  static const BuiltinClocks BOOTTIME =
+    ClockSnapshot_Clock_BuiltinClocks_BOOTTIME;
+  static const BuiltinClocks PROCESS_CPUTIME =
+    ClockSnapshot_Clock_BuiltinClocks_PROCESS_CPUTIME;
+  static const BuiltinClocks THREAD_CPUTIME =
+    ClockSnapshot_Clock_BuiltinClocks_THREAD_CPUTIME;
+  static const BuiltinClocks BUILTIN_CLOCK_MAX_ID =
+    ClockSnapshot_Clock_BuiltinClocks_BUILTIN_CLOCK_MAX_ID;
+  static inline bool BuiltinClocks_IsValid(int value) {
+    return ClockSnapshot_Clock_BuiltinClocks_IsValid(value);
   }
-  static const Type Type_MIN =
-    ClockSnapshot_Clock_Type_Type_MIN;
-  static const Type Type_MAX =
-    ClockSnapshot_Clock_Type_Type_MAX;
-  static const int Type_ARRAYSIZE =
-    ClockSnapshot_Clock_Type_Type_ARRAYSIZE;
+  static const BuiltinClocks BuiltinClocks_MIN =
+    ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_MIN;
+  static const BuiltinClocks BuiltinClocks_MAX =
+    ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_MAX;
+  static const int BuiltinClocks_ARRAYSIZE =
+    ClockSnapshot_Clock_BuiltinClocks_BuiltinClocks_ARRAYSIZE;
 
   // accessors -------------------------------------------------------
 
-  // optional .perfetto.protos.ClockSnapshot.Clock.Type type = 1;
-  bool has_type() const;
-  void clear_type();
-  static const int kTypeFieldNumber = 1;
-  ::perfetto::protos::ClockSnapshot_Clock_Type type() const;
-  void set_type(::perfetto::protos::ClockSnapshot_Clock_Type value);
+  // optional uint32 clock_id = 1;
+  bool has_clock_id() const;
+  void clear_clock_id();
+  static const int kClockIdFieldNumber = 1;
+  ::google::protobuf::uint32 clock_id() const;
+  void set_clock_id(::google::protobuf::uint32 value);
 
   // optional uint64 timestamp = 2;
   bool has_timestamp() const;
@@ -82151,8 +82162,8 @@ class ClockSnapshot_Clock : public ::google::protobuf::MessageLite {
 
   // @@protoc_insertion_point(class_scope:perfetto.protos.ClockSnapshot.Clock)
  private:
-  inline void set_has_type();
-  inline void clear_has_type();
+  inline void set_has_clock_id();
+  inline void clear_has_clock_id();
   inline void set_has_timestamp();
   inline void clear_has_timestamp();
 
@@ -82162,7 +82173,7 @@ class ClockSnapshot_Clock : public ::google::protobuf::MessageLite {
   ::google::protobuf::uint32 _has_bits_[1];
   mutable int _cached_size_;
   ::google::protobuf::uint64 timestamp_;
-  int type_;
+  ::google::protobuf::uint32 clock_id_;
   #ifdef GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
   friend void  protobuf_AddDesc_perfetto_2ftrace_2fclock_5fsnapshot_2eproto_impl();
   #else
@@ -82292,29 +82303,28 @@ class ClockSnapshot : public ::google::protobuf::MessageLite {
 #if !PROTOBUF_INLINE_NOT_IN_HEADERS
 // ClockSnapshot_Clock
 
-// optional .perfetto.protos.ClockSnapshot.Clock.Type type = 1;
-inline bool ClockSnapshot_Clock::has_type() const {
+// optional uint32 clock_id = 1;
+inline bool ClockSnapshot_Clock::has_clock_id() const {
   return (_has_bits_[0] & 0x00000001u) != 0;
 }
-inline void ClockSnapshot_Clock::set_has_type() {
+inline void ClockSnapshot_Clock::set_has_clock_id() {
   _has_bits_[0] |= 0x00000001u;
 }
-inline void ClockSnapshot_Clock::clear_has_type() {
+inline void ClockSnapshot_Clock::clear_has_clock_id() {
   _has_bits_[0] &= ~0x00000001u;
 }
-inline void ClockSnapshot_Clock::clear_type() {
-  type_ = 0;
-  clear_has_type();
+inline void ClockSnapshot_Clock::clear_clock_id() {
+  clock_id_ = 0u;
+  clear_has_clock_id();
 }
-inline ::perfetto::protos::ClockSnapshot_Clock_Type ClockSnapshot_Clock::type() const {
-  // @@protoc_insertion_point(field_get:perfetto.protos.ClockSnapshot.Clock.type)
-  return static_cast< ::perfetto::protos::ClockSnapshot_Clock_Type >(type_);
+inline ::google::protobuf::uint32 ClockSnapshot_Clock::clock_id() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.ClockSnapshot.Clock.clock_id)
+  return clock_id_;
 }
-inline void ClockSnapshot_Clock::set_type(::perfetto::protos::ClockSnapshot_Clock_Type value) {
-  assert(::perfetto::protos::ClockSnapshot_Clock_Type_IsValid(value));
-  set_has_type();
-  type_ = value;
-  // @@protoc_insertion_point(field_set:perfetto.protos.ClockSnapshot.Clock.type)
+inline void ClockSnapshot_Clock::set_clock_id(::google::protobuf::uint32 value) {
+  set_has_clock_id();
+  clock_id_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.ClockSnapshot.Clock.clock_id)
 }
 
 // optional uint64 timestamp = 2;
@@ -82388,7 +82398,7 @@ ClockSnapshot::clocks() const {
 namespace google {
 namespace protobuf {
 
-template <> struct is_proto_enum< ::perfetto::protos::ClockSnapshot_Clock_Type> : ::google::protobuf::internal::true_type {};
+template <> struct is_proto_enum< ::perfetto::protos::ClockSnapshot_Clock_BuiltinClocks> : ::google::protobuf::internal::true_type {};
 
 }  // namespace protobuf
 }  // namespace google
@@ -82477,7 +82487,7 @@ static ::std::string* MutableUnknownFieldsForClockSnapshot_Clock(
   return ptr->mutable_unknown_fields();
 }
 
-bool ClockSnapshot_Clock_Type_IsValid(int value) {
+bool ClockSnapshot_Clock_BuiltinClocks_IsValid(int value) {
   switch(value) {
     case 0:
     case 1:
@@ -82488,6 +82498,7 @@ bool ClockSnapshot_Clock_Type_IsValid(int value) {
     case 6:
     case 7:
     case 8:
+    case 63:
       return true;
     default:
       return false;
@@ -82495,21 +82506,22 @@ bool ClockSnapshot_Clock_Type_IsValid(int value) {
 }
 
 #if !defined(_MSC_VER) || _MSC_VER >= 1900
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::UNKNOWN;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::REALTIME;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::REALTIME_COARSE;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::MONOTONIC;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::MONOTONIC_COARSE;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::MONOTONIC_RAW;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::BOOTTIME;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::PROCESS_CPUTIME;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::THREAD_CPUTIME;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::Type_MIN;
-const ClockSnapshot_Clock_Type ClockSnapshot_Clock::Type_MAX;
-const int ClockSnapshot_Clock::Type_ARRAYSIZE;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::UNKNOWN;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::REALTIME;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::REALTIME_COARSE;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::MONOTONIC;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::MONOTONIC_COARSE;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::MONOTONIC_RAW;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::BOOTTIME;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::PROCESS_CPUTIME;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::THREAD_CPUTIME;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::BUILTIN_CLOCK_MAX_ID;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::BuiltinClocks_MIN;
+const ClockSnapshot_Clock_BuiltinClocks ClockSnapshot_Clock::BuiltinClocks_MAX;
+const int ClockSnapshot_Clock::BuiltinClocks_ARRAYSIZE;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 #if !defined(_MSC_VER) || _MSC_VER >= 1900
-const int ClockSnapshot_Clock::kTypeFieldNumber;
+const int ClockSnapshot_Clock::kClockIdFieldNumber;
 const int ClockSnapshot_Clock::kTimestampFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
@@ -82535,7 +82547,7 @@ void ClockSnapshot_Clock::SharedCtor() {
   _cached_size_ = 0;
   _unknown_fields_.UnsafeSetDefault(
       &::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  type_ = 0;
+  clock_id_ = 0u;
   timestamp_ = GOOGLE_ULONGLONG(0);
   ::memset(_has_bits_, 0, sizeof(_has_bits_));
 }
@@ -82598,7 +82610,7 @@ void ClockSnapshot_Clock::Clear() {
            ZR_HELPER_(last) - ZR_HELPER_(first) + sizeof(last));\
 } while (0)
 
-  ZR_(timestamp_, type_);
+  ZR_(timestamp_, clock_id_);
 
 #undef ZR_HELPER_
 #undef ZR_
@@ -82623,19 +82635,13 @@ bool ClockSnapshot_Clock::MergePartialFromCodedStream(
     tag = p.first;
     if (!p.second) goto handle_unusual;
     switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
-      // optional .perfetto.protos.ClockSnapshot.Clock.Type type = 1;
+      // optional uint32 clock_id = 1;
       case 1: {
         if (tag == 8) {
-          int value;
           DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
-                   int, ::google::protobuf::internal::WireFormatLite::TYPE_ENUM>(
-                 input, &value)));
-          if (::perfetto::protos::ClockSnapshot_Clock_Type_IsValid(value)) {
-            set_type(static_cast< ::perfetto::protos::ClockSnapshot_Clock_Type >(value));
-          } else {
-            unknown_fields_stream.WriteVarint32(8);
-            unknown_fields_stream.WriteVarint32(value);
-          }
+                   ::google::protobuf::uint32, ::google::protobuf::internal::WireFormatLite::TYPE_UINT32>(
+                 input, &clock_id_)));
+          set_has_clock_id();
         } else {
           goto handle_unusual;
         }
@@ -82683,10 +82689,9 @@ failure:
 void ClockSnapshot_Clock::SerializeWithCachedSizes(
     ::google::protobuf::io::CodedOutputStream* output) const {
   // @@protoc_insertion_point(serialize_start:perfetto.protos.ClockSnapshot.Clock)
-  // optional .perfetto.protos.ClockSnapshot.Clock.Type type = 1;
-  if (has_type()) {
-    ::google::protobuf::internal::WireFormatLite::WriteEnum(
-      1, this->type(), output);
+  // optional uint32 clock_id = 1;
+  if (has_clock_id()) {
+    ::google::protobuf::internal::WireFormatLite::WriteUInt32(1, this->clock_id(), output);
   }
 
   // optional uint64 timestamp = 2;
@@ -82704,10 +82709,11 @@ int ClockSnapshot_Clock::ByteSize() const {
   int total_size = 0;
 
   if (_has_bits_[0 / 32] & 3u) {
-    // optional .perfetto.protos.ClockSnapshot.Clock.Type type = 1;
-    if (has_type()) {
+    // optional uint32 clock_id = 1;
+    if (has_clock_id()) {
       total_size += 1 +
-        ::google::protobuf::internal::WireFormatLite::EnumSize(this->type());
+        ::google::protobuf::internal::WireFormatLite::UInt32Size(
+          this->clock_id());
     }
 
     // optional uint64 timestamp = 2;
@@ -82735,8 +82741,8 @@ void ClockSnapshot_Clock::MergeFrom(const ClockSnapshot_Clock& from) {
 // @@protoc_insertion_point(class_specific_merge_from_start:perfetto.protos.ClockSnapshot.Clock)
   if (GOOGLE_PREDICT_FALSE(&from == this)) clock_snapshot_pb_MergeFromFail(__LINE__);
   if (from._has_bits_[0 / 32] & (0xffu << (0 % 32))) {
-    if (from.has_type()) {
-      set_type(from.type());
+    if (from.has_clock_id()) {
+      set_clock_id(from.clock_id());
     }
     if (from.has_timestamp()) {
       set_timestamp(from.timestamp());
@@ -82764,7 +82770,7 @@ void ClockSnapshot_Clock::Swap(ClockSnapshot_Clock* other) {
   InternalSwap(other);
 }
 void ClockSnapshot_Clock::InternalSwap(ClockSnapshot_Clock* other) {
-  std::swap(type_, other->type_);
+  std::swap(clock_id_, other->clock_id_);
   std::swap(timestamp_, other->timestamp_);
   std::swap(_has_bits_[0], other->_has_bits_[0]);
   _unknown_fields_.Swap(&other->_unknown_fields_);
@@ -82986,29 +82992,28 @@ void ClockSnapshot::InternalSwap(ClockSnapshot* other) {
 #if PROTOBUF_INLINE_NOT_IN_HEADERS
 // ClockSnapshot_Clock
 
-// optional .perfetto.protos.ClockSnapshot.Clock.Type type = 1;
-bool ClockSnapshot_Clock::has_type() const {
+// optional uint32 clock_id = 1;
+bool ClockSnapshot_Clock::has_clock_id() const {
   return (_has_bits_[0] & 0x00000001u) != 0;
 }
-void ClockSnapshot_Clock::set_has_type() {
+void ClockSnapshot_Clock::set_has_clock_id() {
   _has_bits_[0] |= 0x00000001u;
 }
-void ClockSnapshot_Clock::clear_has_type() {
+void ClockSnapshot_Clock::clear_has_clock_id() {
   _has_bits_[0] &= ~0x00000001u;
 }
-void ClockSnapshot_Clock::clear_type() {
-  type_ = 0;
-  clear_has_type();
+void ClockSnapshot_Clock::clear_clock_id() {
+  clock_id_ = 0u;
+  clear_has_clock_id();
 }
- ::perfetto::protos::ClockSnapshot_Clock_Type ClockSnapshot_Clock::type() const {
-  // @@protoc_insertion_point(field_get:perfetto.protos.ClockSnapshot.Clock.type)
-  return static_cast< ::perfetto::protos::ClockSnapshot_Clock_Type >(type_);
+ ::google::protobuf::uint32 ClockSnapshot_Clock::clock_id() const {
+  // @@protoc_insertion_point(field_get:perfetto.protos.ClockSnapshot.Clock.clock_id)
+  return clock_id_;
 }
- void ClockSnapshot_Clock::set_type(::perfetto::protos::ClockSnapshot_Clock_Type value) {
-  assert(::perfetto::protos::ClockSnapshot_Clock_Type_IsValid(value));
-  set_has_type();
-  type_ = value;
-  // @@protoc_insertion_point(field_set:perfetto.protos.ClockSnapshot.Clock.type)
+ void ClockSnapshot_Clock::set_clock_id(::google::protobuf::uint32 value) {
+  set_has_clock_id();
+  clock_id_ = value;
+  // @@protoc_insertion_point(field_set:perfetto.protos.ClockSnapshot.Clock.clock_id)
 }
 
 // optional uint64 timestamp = 2;
@@ -89154,9 +89159,19 @@ class SystemInfo;
 class TestEvent;
 class ThreadDescriptor;
 class TraceConfig;
+class TracePacketDefaults;
 class TraceStats;
 class TrackEvent;
 class Trigger;
+
+enum TracePacket_SequenceFlags : int32_t {
+  TracePacket_SequenceFlags_SEQ_UNSPECIFIED = 0,
+  TracePacket_SequenceFlags_SEQ_INCREMENTAL_STATE_CLEARED = 1,
+  TracePacket_SequenceFlags_SEQ_NEEDS_INCREMENTAL_STATE = 2,
+};
+
+const TracePacket_SequenceFlags TracePacket_SequenceFlags_MIN = TracePacket_SequenceFlags_SEQ_UNSPECIFIED;
+const TracePacket_SequenceFlags TracePacket_SequenceFlags_MAX = TracePacket_SequenceFlags_SEQ_NEEDS_INCREMENTAL_STATE;
 
 class TracePacket_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID=*/900, /*HAS_REPEATED_FIELDS=*/false> {
  public:
@@ -89165,6 +89180,8 @@ class TracePacket_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID
   explicit TracePacket_Decoder(const ::protozero::ConstBytes& raw) : TypedProtoDecoder(raw.data, raw.size) {}
   bool has_timestamp() const { return at<8>().valid(); }
   uint64_t timestamp() const { return at<8>().as_uint64(); }
+  bool has_timestamp_clock_id() const { return at<58>().valid(); }
+  uint32_t timestamp_clock_id() const { return at<58>().as_uint32(); }
   bool has_ftrace_events() const { return at<1>().valid(); }
   ::protozero::ConstBytes ftrace_events() const { return at<1>().as_bytes(); }
   bool has_process_tree() const { return at<2>().valid(); }
@@ -89235,8 +89252,12 @@ class TracePacket_Decoder : public ::protozero::TypedProtoDecoder</*MAX_FIELD_ID
   uint32_t trusted_packet_sequence_id() const { return at<10>().as_uint32(); }
   bool has_interned_data() const { return at<12>().valid(); }
   ::protozero::ConstBytes interned_data() const { return at<12>().as_bytes(); }
+  bool has_sequence_flags() const { return at<13>().valid(); }
+  uint32_t sequence_flags() const { return at<13>().as_uint32(); }
   bool has_incremental_state_cleared() const { return at<41>().valid(); }
   bool incremental_state_cleared() const { return at<41>().as_bool(); }
+  bool has_trace_packet_defaults() const { return at<59>().valid(); }
+  ::protozero::ConstBytes trace_packet_defaults() const { return at<59>().as_bytes(); }
   bool has_previous_packet_dropped() const { return at<42>().valid(); }
   bool previous_packet_dropped() const { return at<42>().as_bool(); }
 };
@@ -89246,6 +89267,7 @@ class TracePacket : public ::protozero::Message {
   using Decoder = TracePacket_Decoder;
   enum : int32_t {
     kTimestampFieldNumber = 8,
+    kTimestampClockIdFieldNumber = 58,
     kFtraceEventsFieldNumber = 1,
     kProcessTreeFieldNumber = 2,
     kProcessStatsFieldNumber = 9,
@@ -89281,11 +89303,20 @@ class TracePacket : public ::protozero::Message {
     kTrustedUidFieldNumber = 3,
     kTrustedPacketSequenceIdFieldNumber = 10,
     kInternedDataFieldNumber = 12,
+    kSequenceFlagsFieldNumber = 13,
     kIncrementalStateClearedFieldNumber = 41,
+    kTracePacketDefaultsFieldNumber = 59,
     kPreviousPacketDroppedFieldNumber = 42,
   };
+  using SequenceFlags = ::perfetto::protos::pbzero::TracePacket_SequenceFlags;
+  static const SequenceFlags SEQ_UNSPECIFIED = TracePacket_SequenceFlags_SEQ_UNSPECIFIED;
+  static const SequenceFlags SEQ_INCREMENTAL_STATE_CLEARED = TracePacket_SequenceFlags_SEQ_INCREMENTAL_STATE_CLEARED;
+  static const SequenceFlags SEQ_NEEDS_INCREMENTAL_STATE = TracePacket_SequenceFlags_SEQ_NEEDS_INCREMENTAL_STATE;
   void set_timestamp(uint64_t value) {
     AppendVarInt(8, value);
+  }
+  void set_timestamp_clock_id(uint32_t value) {
+    AppendVarInt(58, value);
   }
   template <typename T = FtraceEventBundle> T* set_ftrace_events() {
     return BeginNestedMessage<T>(1);
@@ -89423,9 +89454,16 @@ class TracePacket : public ::protozero::Message {
     return BeginNestedMessage<T>(12);
   }
 
+  void set_sequence_flags(uint32_t value) {
+    AppendVarInt(13, value);
+  }
   void set_incremental_state_cleared(bool value) {
     AppendTinyVarInt(41, value);
   }
+  template <typename T = TracePacketDefaults> T* set_trace_packet_defaults() {
+    return BeginNestedMessage<T>(59);
+  }
+
   void set_previous_packet_dropped(bool value) {
     AppendTinyVarInt(42, value);
   }
@@ -91119,6 +91157,52 @@ std::pair<size_t, size_t> SharedMemoryABI::GetPageAndChunkIndex(
 // gen_amalgamated begin source: src/tracing/core/shared_memory_arbiter_impl.cc
 // gen_amalgamated begin header: src/tracing/core/shared_memory_arbiter_impl.h
 // gen_amalgamated begin header: include/perfetto/ext/tracing/core/shared_memory_arbiter.h
+// gen_amalgamated begin header: include/perfetto/ext/tracing/core/buffer_exhausted_policy.h
+/*
+ * Copyright (C) 2019 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef INCLUDE_PERFETTO_EXT_TRACING_CORE_BUFFER_EXHAUSTED_POLICY_H_
+#define INCLUDE_PERFETTO_EXT_TRACING_CORE_BUFFER_EXHAUSTED_POLICY_H_
+
+namespace perfetto {
+
+// Determines how SharedMemoryArbiterImpl::GetNewChunk() behaves when no free
+// chunks are available.
+enum class BufferExhaustedPolicy {
+  // SharedMemoryArbiterImpl::GetNewChunk() will stall if no free SMB chunk is
+  // available and wait for the tracing service to free one. Note that this
+  // requires that messages the arbiter sends to the tracing service (from any
+  // TraceWriter thread) will be received by it, even if all TraceWriter threads
+  // are stalled.
+  kStall,
+
+  // SharedMemoryArbiterImpl::GetNewChunk() will return an invalid chunk if no
+  // free SMB chunk is available. In this case, the TraceWriter will fall back
+  // to a garbage chunk and drop written data until acquiring a future chunk
+  // succeeds again.
+  kDrop,
+
+  // TODO(eseckler): Switch to kDrop by default and change the Android code to
+  // explicitly request kStall instead.
+  kDefault = kStall
+};
+
+}  // namespace perfetto
+
+#endif  // INCLUDE_PERFETTO_EXT_TRACING_CORE_BUFFER_EXHAUSTED_POLICY_H_
 // gen_amalgamated begin header: include/perfetto/ext/tracing/core/tracing_service.h
 // gen_amalgamated begin header: include/perfetto/ext/tracing/core/shared_memory.h
 /*
@@ -91202,6 +91286,7 @@ class PERFETTO_EXPORT SharedMemory {
 // gen_amalgamated expanded: #include "perfetto/base/export.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/scoped_file.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/buffer_exhausted_policy.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory.h"
 
 namespace perfetto {
@@ -91280,7 +91365,9 @@ class PERFETTO_EXPORT ProducerEndpoint {
   // upon creation of the data source (StartDataSource()) in the
   // DataSourceConfig.target_buffer().
   virtual std::unique_ptr<TraceWriter> CreateTraceWriter(
-      BufferID target_buffer) = 0;
+      BufferID target_buffer,
+      BufferExhaustedPolicy buffer_exhausted_policy =
+          BufferExhaustedPolicy::kDefault) = 0;
 
   // If TracingService::ConnectProducer is called with |in_process=true|,
   // this returns the producer's SharedMemoryArbiter which can be used
@@ -91505,6 +91592,7 @@ class PERFETTO_EXPORT TracingService {
 
 // gen_amalgamated expanded: #include "perfetto/base/export.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/buffer_exhausted_policy.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/tracing_service.h"
 
 namespace perfetto {
@@ -91523,26 +91611,6 @@ class TraceWriter;
 // from the SharedMemory it receives from the Service-side.
 class PERFETTO_EXPORT SharedMemoryArbiter {
  public:
-  // Determines how GetNewChunk() behaves when no free chunks are available.
-  enum class BufferExhaustedPolicy {
-    // SharedMemoryArbiterImpl::GetNewChunk() will stall if no free SMB chunk is
-    // available and wait for the tracing service to free one. Note that this
-    // requires that messages the arbiter sends to the tracing service (from any
-    // TraceWriter thread) will be received by it, even if all TraceWriter
-    // threads are stalled.
-    kStall,
-
-    // SharedMemoryArbiterImpl::GetNewChunk() will return an invalid chunk if no
-    // free SMB chunk is available. In this case, the TraceWriter will fall back
-    // to a garbage chunk and drop written data until acquiring a future chunk
-    // succeeds again.
-    kDrop,
-
-    // TODO(eseckler): Switch to kDrop by default and change the Android code to
-    // explicitly request kStall instead.
-    kDefault = kStall
-  };
-
   virtual ~SharedMemoryArbiter();
 
   // Creates a new TraceWriter and assigns it a new WriterID. The WriterID is
@@ -91628,6 +91696,7 @@ class PERFETTO_EXPORT SharedMemoryArbiter {
 // gen_amalgamated expanded: #include "perfetto/base/export.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/weak_ptr.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/buffer_exhausted_policy.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_arbiter.h"
 
 namespace perfetto {
@@ -91677,8 +91746,7 @@ class PERFETTO_EXPORT StartupTraceWriterRegistry {
   // destroyed by the caller directly, but instead returned to the registry by
   // calling StartupTraceWriter::ReturnToRegistry.
   std::unique_ptr<StartupTraceWriter> CreateUnboundTraceWriter(
-      SharedMemoryArbiter::BufferExhaustedPolicy =
-          SharedMemoryArbiter::BufferExhaustedPolicy::kDefault);
+      BufferExhaustedPolicy = BufferExhaustedPolicy::kDefault);
 
   // Binds all StartupTraceWriters created by this registry to the given arbiter
   // and target buffer. Should only be called once and on the passed
@@ -92036,6 +92104,7 @@ class PatchList {
 #define SRC_TRACING_CORE_TRACE_WRITER_IMPL_H_
 
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/buffer_exhausted_policy.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_abi.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_arbiter.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_writer.h"
@@ -92056,7 +92125,7 @@ class TraceWriterImpl : public TraceWriter,
   TraceWriterImpl(SharedMemoryArbiterImpl*,
                   WriterID,
                   BufferID,
-                  SharedMemoryArbiter::BufferExhaustedPolicy);
+                  BufferExhaustedPolicy);
   ~TraceWriterImpl() override;
 
   // TraceWriter implementation. See documentation in trace_writer.h.
@@ -92091,7 +92160,7 @@ class TraceWriterImpl : public TraceWriter,
 
   // Whether GetNewChunk() should stall or return an invalid chunk if the SMB is
   // exhausted.
-  const SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy_;
+  const BufferExhaustedPolicy buffer_exhausted_policy_;
 
   // Monotonic (% wrapping) sequence id of the chunk. Together with the WriterID
   // this allows the Service to reconstruct the linear sequence of packets.
@@ -93602,6 +93671,7 @@ struct hash<perfetto::base::Optional<T>> {
 // gen_amalgamated expanded: #include "perfetto/ext/base/optional.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/basic_types.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/buffer_exhausted_policy.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_abi.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/shared_memory_arbiter.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_writer.h"
@@ -93701,7 +93771,7 @@ class PERFETTO_EXPORT StartupTraceWriter
   // to by the handle. The writer can later be bound by calling
   // BindToTraceWriter(). The registry handle may be nullptr in tests.
   StartupTraceWriter(std::shared_ptr<StartupTraceWriterRegistryHandle>,
-                     SharedMemoryArbiter::BufferExhaustedPolicy);
+                     BufferExhaustedPolicy);
 
   StartupTraceWriter(const StartupTraceWriter&) = delete;
   StartupTraceWriter& operator=(const StartupTraceWriter&) = delete;
@@ -93745,8 +93815,8 @@ class PERFETTO_EXPORT StartupTraceWriter
   // check on later calls to NewTracePacket().
   bool was_bound_ = false;
 
-  const SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy_ =
-      SharedMemoryArbiter::BufferExhaustedPolicy::kDefault;
+  const BufferExhaustedPolicy buffer_exhausted_policy_ =
+      BufferExhaustedPolicy::kDefault;
 
   // All variables below this point are protected by |lock_|.
   std::mutex lock_;
@@ -93810,12 +93880,11 @@ namespace {
 
 static constexpr ChunkID kFirstChunkId = 0;
 
-SharedMemoryABI::Chunk NewChunk(
-    SharedMemoryArbiterImpl* arbiter,
-    WriterID writer_id,
-    ChunkID chunk_id,
-    bool fragmenting_packet,
-    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy) {
+SharedMemoryABI::Chunk NewChunk(SharedMemoryArbiterImpl* arbiter,
+                                WriterID writer_id,
+                                ChunkID chunk_id,
+                                bool fragmenting_packet,
+                                BufferExhaustedPolicy buffer_exhausted_policy) {
   ChunkHeader::Packets packets = {};
   if (fragmenting_packet) {
     packets.count = 1;
@@ -93907,15 +93976,14 @@ class LocalBufferReader {
 // commit before continuing with the remaining data.
 class LocalBufferCommitter {
  public:
-  LocalBufferCommitter(
-      std::unique_ptr<LocalBufferReader> local_buffer_reader,
-      std::unique_ptr<std::vector<uint32_t>> packet_sizes,
-      base::WeakPtr<SharedMemoryArbiterImpl> arbiter,
-      WriterID writer_id,
-      BufferID target_buffer,
-      size_t chunks_per_batch,
-      SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy,
-      SharedMemoryABI::Chunk first_chunk)
+  LocalBufferCommitter(std::unique_ptr<LocalBufferReader> local_buffer_reader,
+                       std::unique_ptr<std::vector<uint32_t>> packet_sizes,
+                       base::WeakPtr<SharedMemoryArbiterImpl> arbiter,
+                       WriterID writer_id,
+                       BufferID target_buffer,
+                       size_t chunks_per_batch,
+                       BufferExhaustedPolicy buffer_exhausted_policy,
+                       SharedMemoryABI::Chunk first_chunk)
       : local_buffer_reader_(std::move(local_buffer_reader)),
         packet_sizes_(std::move(packet_sizes)),
         arbiter_(arbiter),
@@ -94114,7 +94182,7 @@ class LocalBufferCommitter {
   const WriterID writer_id_;
   const BufferID target_buffer_;
   const size_t chunks_per_batch_;
-  SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy_;
+  BufferExhaustedPolicy buffer_exhausted_policy_;
   SharedMemoryABI::Chunk cur_chunk_;
   // We receive the first chunk in the constructor, thus the next chunk will be
   // the second one.
@@ -94128,7 +94196,7 @@ class LocalBufferCommitter {
 
 StartupTraceWriter::StartupTraceWriter(
     std::shared_ptr<StartupTraceWriterRegistryHandle> registry_handle,
-    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy)
+    BufferExhaustedPolicy buffer_exhausted_policy)
     : registry_handle_(std::move(registry_handle)),
       buffer_exhausted_policy_(buffer_exhausted_policy),
       memory_buffer_(new protozero::ScatteredHeapBuffer()),
@@ -94434,7 +94502,7 @@ StartupTraceWriterRegistry::~StartupTraceWriterRegistry() {
 
 std::unique_ptr<StartupTraceWriter>
 StartupTraceWriterRegistry::CreateUnboundTraceWriter(
-    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy) {
+    BufferExhaustedPolicy buffer_exhausted_policy) {
   std::lock_guard<std::mutex> lock(lock_);
   PERFETTO_DCHECK(!arbiter_);  // Should only be called while unbound.
   std::unique_ptr<StartupTraceWriter> writer(
@@ -96008,7 +96076,11 @@ void TraceBuffer::CopyChunkUntrusted(ProducerID producer_id_trusted,
   if (PERFETTO_UNLIKELY(!chunk_complete)) {
     if (num_fragments > 0) {
       num_fragments--;
+      // These flags should only affect the last packet in the chunk. We clear
+      // them, so that TraceBuffer is able to look at the remaining packets in
+      // this chunk.
       chunk_flags &= ~kLastPacketContinuesOnNextChunk;
+      chunk_flags &= ~kChunkNeedsPatching;
     }
   }
 
@@ -96717,10 +96789,10 @@ TraceBuffer::ReadPacketResult TraceBuffer::ReadNextPacketInChunk(
   const uint8_t* next_packet = packet_data + packet_size;
   if (PERFETTO_UNLIKELY(next_packet <= packet_begin ||
                         next_packet > record_end)) {
-    // In SharedMemoryArbiter::BufferExhaustedPolicy::kDrop mode, TraceWriter
-    // may abort a fragmented packet by writing an invalid size in the last
-    // fragment's header. We should handle this case without recording an ABI
-    // violation (since Android R).
+    // In BufferExhaustedPolicy::kDrop mode, TraceWriter may abort a fragmented
+    // packet by writing an invalid size in the last fragment's header. We
+    // should handle this case without recording an ABI violation (since Android
+    // R).
     if (packet_size != SharedMemoryABI::kPacketSizeDropPacket) {
       stats_.set_abi_violations(stats_.abi_violations() + 1);
       PERFETTO_DCHECK(suppress_sanity_dchecks_for_testing_);
@@ -98993,11 +99065,10 @@ constexpr size_t kPacketHeaderSize = SharedMemoryABI::kPacketHeaderSize;
 uint8_t g_garbage_chunk[1024];
 }  // namespace
 
-TraceWriterImpl::TraceWriterImpl(
-    SharedMemoryArbiterImpl* shmem_arbiter,
-    WriterID id,
-    BufferID target_buffer,
-    SharedMemoryArbiter::BufferExhaustedPolicy buffer_exhausted_policy)
+TraceWriterImpl::TraceWriterImpl(SharedMemoryArbiterImpl* shmem_arbiter,
+                                 WriterID id,
+                                 BufferID target_buffer,
+                                 BufferExhaustedPolicy buffer_exhausted_policy)
     : shmem_arbiter_(shmem_arbiter),
       id_(id),
       target_buffer_(target_buffer),
@@ -99412,7 +99483,9 @@ class TracingServiceImpl : public TracingService {
     void UnregisterTraceWriter(uint32_t writer_id) override;
     void CommitData(const CommitDataRequest&, CommitDataCallback) override;
     void SetSharedMemory(std::unique_ptr<SharedMemory>);
-    std::unique_ptr<TraceWriter> CreateTraceWriter(BufferID) override;
+    std::unique_ptr<TraceWriter> CreateTraceWriter(
+        BufferID,
+        BufferExhaustedPolicy) override;
     SharedMemoryArbiter* GetInProcessShmemArbiter() override;
     void NotifyFlushComplete(FlushRequestID) override;
     void NotifyDataSourceStarted(DataSourceInstanceID) override;
@@ -102490,7 +102563,7 @@ void TracingServiceImpl::SnapshotClocks(std::vector<TracePacket>* packets,
     !PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)
   struct {
     clockid_t id;
-    protos::ClockSnapshot::Clock::Type type;
+    protos::ClockSnapshot::Clock::BuiltinClocks type;
     struct timespec ts;
   } clocks[] = {
       {CLOCK_BOOTTIME, protos::ClockSnapshot::Clock::BOOTTIME, {0, 0}},
@@ -102524,7 +102597,7 @@ void TracingServiceImpl::SnapshotClocks(std::vector<TracePacket>* packets,
           static_cast<uint64_t>(base::FromPosixTimespec(clock.ts).count()));
     }
     protos::ClockSnapshot::Clock* c = clock_snapshot->add_clocks();
-    c->set_type(clock.type);
+    c->set_clock_id(clock.type);
     c->set_timestamp(
         static_cast<uint64_t>(base::FromPosixTimespec(clock.ts).count()));
   }
@@ -102533,7 +102606,7 @@ void TracingServiceImpl::SnapshotClocks(std::vector<TracePacket>* packets,
   if (set_root_timestamp)
     packet.set_timestamp(wall_time_ns);
   protos::ClockSnapshot::Clock* c = clock_snapshot->add_clocks();
-  c->set_type(protos::ClockSnapshot::Clock::MONOTONIC);
+  c->set_clock_id(protos::ClockSnapshot::Clock::MONOTONIC);
   c->set_timestamp(wall_time_ns);
 #endif  // !PERFETTO_BUILDFLAG(PERFETTO_OS_MACOSX)
 
@@ -103079,8 +103152,11 @@ TracingServiceImpl::ProducerEndpointImpl::GetInProcessShmemArbiter() {
 
 // Can be called on any thread.
 std::unique_ptr<TraceWriter>
-TracingServiceImpl::ProducerEndpointImpl::CreateTraceWriter(BufferID buf_id) {
-  return GetInProcessShmemArbiter()->CreateTraceWriter(buf_id);
+TracingServiceImpl::ProducerEndpointImpl::CreateTraceWriter(
+    BufferID buf_id,
+    BufferExhaustedPolicy buffer_exhausted_policy) {
+  return GetInProcessShmemArbiter()->CreateTraceWriter(buf_id,
+                                                       buffer_exhausted_policy);
 }
 
 void TracingServiceImpl::ProducerEndpointImpl::NotifyFlushComplete(
@@ -104355,7 +104431,8 @@ class ProducerIPCClientImpl : public TracingService::ProducerEndpoint,
   void ActivateTriggers(const std::vector<std::string>&) override;
 
   std::unique_ptr<TraceWriter> CreateTraceWriter(
-      BufferID target_buffer) override;
+      BufferID target_buffer,
+      BufferExhaustedPolicy) override;
   SharedMemoryArbiter* GetInProcessShmemArbiter() override;
   void NotifyFlushComplete(FlushRequestID) override;
   SharedMemory* shared_memory() const override;
@@ -104759,10 +104836,12 @@ void ProducerIPCClientImpl::ActivateTriggers(
 }
 
 std::unique_ptr<TraceWriter> ProducerIPCClientImpl::CreateTraceWriter(
-    BufferID target_buffer) {
+    BufferID target_buffer,
+    BufferExhaustedPolicy buffer_exhausted_policy) {
   // This method can be called by different threads. |shared_memory_arbiter_| is
   // thread-safe but be aware of accessing any other state in this function.
-  return shared_memory_arbiter_->CreateTraceWriter(target_buffer);
+  return shared_memory_arbiter_->CreateTraceWriter(target_buffer,
+                                                   buffer_exhausted_policy);
 }
 
 SharedMemoryArbiter* ProducerIPCClientImpl::GetInProcessShmemArbiter() {
@@ -106289,13 +106368,17 @@ struct DataSourceStaticState {
 
 // Per-DataSource-instance thread-local state.
 struct DataSourceInstanceThreadLocalState {
+  using IncrementalStatePointer = std::unique_ptr<void, void (*)(void*)>;
+
   void Reset() {
     trace_writer.reset();
+    incremental_state.reset();
     backend_id = 0;
     buffer_id = 0;
   }
 
   std::unique_ptr<TraceWriterBase> trace_writer;
+  IncrementalStatePointer incremental_state = {nullptr, [](void*) {}};
   TracingBackendId backend_id;
   BufferId buffer_id;
 };
@@ -106750,7 +106833,12 @@ class PERFETTO_EXPORT DataSourceBase {
 // Templated base class meant to be derived by embedders to create a custom data
 // source. DataSourceType must be the type of the derived class itself, e.g.:
 // class MyDataSource : public DataSourceBase<MyDataSource> {...}.
-template <typename DataSourceType>
+//
+// |IncrementalStateType| can optionally be used store custom per-sequence
+// incremental data (e.g., interning tables). It should have a Clear() method
+// for when incremental state needs to be cleared. See
+// TraceContext::GetIncrementalState().
+template <typename DataSourceType, typename IncrementalStateType = void>
 class DataSource : public DataSourceBase {
  public:
   // Argument passed to the lambda function passed to Trace() (below).
@@ -106763,7 +106851,7 @@ class DataSource : public DataSourceBase {
     ~TraceContext() = default;
 
     TracePacketHandle NewTracePacket() {
-      return trace_writer_->NewTracePacket();
+      return tls_inst_->trace_writer->NewTracePacket();
     }
 
     // Forces a commit of the thread-local tracing data written so far to the
@@ -106780,7 +106868,9 @@ class DataSource : public DataSourceBase {
     // service to ACK the flush and will be invoked on an internal thread after
     // the service has  acknowledged it. The callback might be NEVER INVOKED if
     // the service crashes or the IPC connection is dropped.
-    void Flush(std::function<void()> cb = {}) { trace_writer_->Flush(cb); }
+    void Flush(std::function<void()> cb = {}) {
+      tls_inst_->trace_writer->Flush(cb);
+    }
 
     // Returns a RAII handle to access the data source instance, guaranteeing
     // that it won't be deleted on another thread (because of trace stopping)
@@ -106798,14 +106888,20 @@ class DataSource : public DataSourceBase {
           static_cast<DataSourceType*>(internal_state->data_source.get()));
     }
 
+    IncrementalStateType* GetIncrementalState() {
+      return reinterpret_cast<IncrementalStateType*>(
+          tls_inst_->incremental_state.get());
+    }
+
    private:
     friend class DataSource;
-    TraceContext(TraceWriterBase* trace_writer, uint32_t instance_index)
-        : trace_writer_(trace_writer), instance_index_(instance_index) {}
+    TraceContext(internal::DataSourceInstanceThreadLocalState* tls_inst,
+                 uint32_t instance_index)
+        : tls_inst_(tls_inst), instance_index_(instance_index) {}
     TraceContext(const TraceContext&) = delete;
     TraceContext& operator=(const TraceContext&) = delete;
 
-    TraceWriterBase* const trace_writer_;
+    internal::DataSourceInstanceThreadLocalState* const tls_inst_;
     uint32_t const instance_index_;
   };
 
@@ -106901,9 +106997,7 @@ class DataSource : public DataSourceBase {
       // handshaking to make this extremely unrealistic.
 
       auto& tls_inst = tls_state_->per_instance[i];
-      TraceWriterBase* trace_writer = tls_inst.trace_writer.get();
-
-      if (PERFETTO_UNLIKELY(!trace_writer)) {
+      if (PERFETTO_UNLIKELY(!tls_inst.trace_writer)) {
         // Here we need an acquire barrier, which matches the release-store made
         // by TracingMuxerImpl::SetupDataSource(), to ensure that the backend_id
         // and buffer_id are consistent.
@@ -106915,14 +107009,15 @@ class DataSource : public DataSourceBase {
         tls_inst.backend_id = instance_state->backend_id;
         tls_inst.buffer_id = instance_state->buffer_id;
         tls_inst.trace_writer = tracing_impl->CreateTraceWriter(instance_state);
-        trace_writer = tls_inst.trace_writer.get();
+        CreateIncrementalState(&tls_inst,
+                               static_cast<IncrementalStateType*>(nullptr));
 
         // Even in the case of out-of-IDs, SharedMemoryArbiterImpl returns a
         // NullTraceWriter. The returned pointer should never be null.
-        assert(trace_writer);
+        assert(tls_inst.trace_writer);
       }
 
-      tracing_fn(TraceContext(trace_writer, i));
+      tracing_fn(TraceContext(&tls_inst, i));
     }
   }
 
@@ -106949,6 +107044,24 @@ class DataSource : public DataSourceBase {
                                             &static_state_);
   }
 
+ private:
+  // Create the user provided incremental state in the given thread-local
+  // storage. Note: The second parameter here is used to specialize the case
+  // where there is no incremental state type.
+  template <typename T>
+  static void CreateIncrementalState(
+      internal::DataSourceInstanceThreadLocalState* tls_inst,
+      const T*) {
+    PERFETTO_DCHECK(!tls_inst->incremental_state);
+    tls_inst->incremental_state =
+        internal::DataSourceInstanceThreadLocalState::IncrementalStatePointer(
+            reinterpret_cast<void*>(new T()),
+            [](void* p) { delete reinterpret_cast<T*>(p); });
+  }
+  static void CreateIncrementalState(
+      internal::DataSourceInstanceThreadLocalState*,
+      const void*) {}
+
   // Static state. Accessed by the static Trace() method fastpaths.
   static internal::DataSourceStaticState static_state_;
 
@@ -106966,24 +107079,24 @@ class DataSource : public DataSourceBase {
 
 // If a data source is used across translation units, this declaration must be
 // placed into the header file defining the data source.
-#define PERFETTO_DECLARE_DATA_SOURCE_STATIC_MEMBERS(X)         \
+#define PERFETTO_DECLARE_DATA_SOURCE_STATIC_MEMBERS(...)       \
   template <>                                                  \
   perfetto::internal::DataSourceStaticState                    \
-      perfetto::DataSource<X>::static_state_;                  \
+      perfetto::DataSource<__VA_ARGS__>::static_state_;        \
   template <>                                                  \
   thread_local perfetto::internal::DataSourceThreadLocalState* \
-      perfetto::DataSource<X>::tls_state_
+      perfetto::DataSource<__VA_ARGS__>::tls_state_
 
 // The API client must use this in a translation unit. This is because it needs
 // to instantiate the static storage for the datasource to allow the fastpath
 // enabled check.
-#define PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS(X)          \
+#define PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS(...)        \
   template <>                                                  \
   perfetto::internal::DataSourceStaticState                    \
-      perfetto::DataSource<X>::static_state_{};                \
+      perfetto::DataSource<__VA_ARGS__>::static_state_{};      \
   template <>                                                  \
   thread_local perfetto::internal::DataSourceThreadLocalState* \
-      perfetto::DataSource<X>::tls_state_ = nullptr
+      perfetto::DataSource<__VA_ARGS__>::tls_state_ = nullptr
 
 #endif  // INCLUDE_PERFETTO_TRACING_DATA_SOURCE_H_
 /*
@@ -107825,6 +107938,7 @@ class SystemTracingBackend : public TracingBackend {
 // gen_amalgamated expanded: #include "perfetto/base/task_runner.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/thread_checker.h"
 // gen_amalgamated expanded: #include "perfetto/ext/base/waitable_event.h"
+// gen_amalgamated expanded: #include "perfetto/ext/tracing/core/buffer_exhausted_policy.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_packet.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/trace_writer.h"
 // gen_amalgamated expanded: #include "perfetto/ext/tracing/core/tracing_service.h"
@@ -107915,6 +108029,8 @@ void TracingMuxerImpl::ProducerImpl::ClearIncrementalState(
     const DataSourceInstanceID*,
     size_t) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
+  // TODO(skyostil): Mark each affected data source's incremental state as
+  // needing to be cleared.
 }
 // ----- End of TracingMuxerImpl::ProducerImpl methods.
 
@@ -108603,7 +108719,13 @@ TracingMuxerImpl::FindDataSourceRes TracingMuxerImpl::FindDataSource(
 std::unique_ptr<TraceWriterBase> TracingMuxerImpl::CreateTraceWriter(
     DataSourceState* data_source) {
   ProducerImpl* producer = backends_[data_source->backend_id].producer.get();
-  return producer->service_->CreateTraceWriter(data_source->buffer_id);
+  // We choose BufferExhaustedPolicy::kDrop to avoid stalls when all SMB chunks
+  // are allocated, ensuring that the app keeps working even when tracing hits
+  // its SMB limit. Note that this means we will lose data in such a case
+  // (tracked in BufferStats::trace_writer_packet_loss). To reduce this data
+  // loss, apps should choose a large enough SMB size.
+  return producer->service_->CreateTraceWriter(data_source->buffer_id,
+                                               BufferExhaustedPolicy::kDrop);
 }
 
 // This is called via the public API Tracing::NewTrace().
