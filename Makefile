@@ -14,6 +14,7 @@
 
 LIBPROTOBUF_DIR := third_party/protobuf
 NDK_HOME ?= $(HOME)/code/perfetto/buildtools/ndk
+TARGET ?= android
 
 UNAME := $(shell uname)
 ifeq ($(UNAME), Darwin)
@@ -22,7 +23,12 @@ else
 NDK_HOST := linux-x86_64
 endif
 
+ifeq ($(TARGET),android)
 CXX := $(NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST)/bin/clang++
+else
+CXX := clang++
+endif
+
 LNK := $(CXX)
 
 TEST_CFG = duration_ms: 10000; buffers { size_kb: 1024 }; data_sources { config { name: "com.example.mytrace" } }
@@ -53,7 +59,9 @@ ANDROID_CFLAGS += -isystem$(NDK_HOME)/sysroot/usr/include
 ANDROID_CFLAGS += -isystem$(NDK_HOME)/sysroot/usr/include/aarch64-linux-android
 ANDROID_CFLAGS += -DANDROID
 ANDROID_CFLAGS += -D__ANDROID_API__=21
+ifeq ($(TARGET),android)
 CFLAGS += $(ANDROID_CFLAGS)
+endif
 
 ANDROID_LDFLAGS += -gcc-toolchain $(NDK_HOME)/toolchains/aarch64-linux-android-4.9/prebuilt/$(NDK_HOST)
 ANDROID_LDFLAGS += --sysroot=$(NDK_HOME)/platforms/android-21/arch-arm64
@@ -69,8 +77,9 @@ ANDROID_LDFLAGS += -Wl,--fatal-warnings
 ANDROID_LDFLAGS += -pie
 ANDROID_LDFLAGS += -L$(NDK_HOME)/sources/cxx-stl/llvm-libc++/libs/arm64-v8a
 ANDROID_LDFLAGS += -lgcc -lc++_static -lc++abi -llog
+ifeq ($(TARGET),android)
 LDFLAGS += $(ANDROID_LDFLAGS)
-
+endif
 
 PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/arena.cc
 PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/arenastring.cc
@@ -112,7 +121,7 @@ out/mkdir.stamp:
 	@touch $@
 
 # Build object files
-out/%.o: %.cc out/mkdir.stamp out/check_ndk.stamp
+out/%.o: %.cc out/mkdir.stamp out/check_ndk.stamp Makefile
 	@echo CXX $@
 	@$(CXX) -o $@ -c $(CFLAGS) $<
 
