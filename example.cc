@@ -25,6 +25,9 @@ class MyDataSource : public perfetto::DataSource<MyDataSource> {
     // This can be used to access the domain-specific DataSourceConfig, via
     // args.config->xxx_config_raw().
     PERFETTO_ILOG("OnSetup called, name: %s", args.config->name().c_str());
+
+    const std::string& config_raw = args.config->gpu_counter_config_raw();
+    perfetto::protos::pbzero::GpuCounterConfig::Decoder config(config_raw);
   }
 
   void OnStart(const StartArgs&) override { PERFETTO_ILOG("OnStart called"); }

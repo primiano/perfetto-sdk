@@ -45,6 +45,7 @@
 #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_COMPONENT_BUILD() (0)
 #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_FORCE_DLOG_ON() (0)
 #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_FORCE_DLOG_OFF() (0)
+#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_VERSION_GEN() (0)
 
 #endif  // GEN_BUILD_CONFIG_PERFETTO_BUILD_FLAGS_H_
 /*
@@ -300,6 +301,8 @@ inline void ignore_result(const T&...) {}
 // gen_amalgamated expanded: #include "perfetto/base/build_config.h"
 // gen_amalgamated expanded: #include "perfetto/base/compiler.h"
 
+// TODO(primiano): movee this to base/build_config.h, turn into
+// PERFETTO_BUILDFLAG(DCHECK_IS_ON) and update call sites to use that instead.
 #if defined(NDEBUG) && !defined(DCHECK_ALWAYS_ON)
 #define PERFETTO_DCHECK_IS_ON() 0
 #else
@@ -2630,184 +2633,6 @@ uint8_t* ScatteredStreamWriter::ReserveBytes(size_t size) {
 }
 
 }  // namespace protozero
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/android_log_constants.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/commit_data_request.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/data_source_descriptor.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/descriptor.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/gpu_counter_descriptor.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/observable_events.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/sys_stats_counters.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/tracing_service_state.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/common/trace_stats.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/android/android_log_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/android/packages_list_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/ftrace/ftrace_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/gpu/gpu_counter_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/inode_file/inode_file_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/power/android_power_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/process_stats/process_stats_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/profiling/heapprofd_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/sys_stats/sys_stats_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/chrome/chrome_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/data_source_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/test_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/config/trace_config.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/android/android_log.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/android/graphics_frame_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/android/packages_list.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/profiling/profile_common.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/profiling/profile_packet.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/profiling/heap_graph.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/debug_annotation.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/process_descriptor.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/source_location.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/log_message.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/task_execution.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/thread_descriptor.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/track_event/track_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/interned_data/interned_data.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/chrome/chrome_trace_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/chrome/chrome_benchmark_metadata.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/chrome/chrome_metadata.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/filesystem/inode_file_map.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/ftrace_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/ftrace_event_bundle.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/ftrace_stats.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/test_bundle_wrapper.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/generic.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/binder.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/block.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/cgroup.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/clk.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/compaction.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/ext4.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/f2fs.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/fence.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/filemap.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/ftrace.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/gpu.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/i2c.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/ipi.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/irq.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/kmem.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/lowmemorykiller.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/mdss.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/mm_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/oom.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/power.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/raw_syscalls.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/regulator.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/sched.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/signal.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/sync.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/systrace.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/task.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/vmscan.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ftrace/workqueue.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/gpu/gpu_counter_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/gpu/gpu_render_stage_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/perfetto/perfetto_metatrace.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/power/battery_counters.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/power/power_rails.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ps/process_stats.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/ps/process_tree.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/sys_stats/sys_stats.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/clock_snapshot.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/trigger.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/system_info.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/trace_packet_defaults.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/test_event.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/trace_packet.pbzero.cc
-// Intentionally empty
-// gen_amalgamated begin source: out/tmp.gen_amalgamated/gen/protos/perfetto/trace/trace.pbzero.cc
-// Intentionally empty
 // gen_amalgamated begin source: src/base/file_utils.cc
 // gen_amalgamated begin header: include/perfetto/ext/base/file_utils.h
 /*
