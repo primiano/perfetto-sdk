@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-LIBPROTOBUF_DIR := third_party/protobuf
 NDK_HOME ?= $(HOME)/code/perfetto/buildtools/ndk
 TARGET ?= android
 
@@ -42,12 +41,9 @@ CFLAGS += -fno-exceptions
 CFLAGS += -fno-rtti
 CFLAGS += -fvisibility=hidden
 CFLAGS += -Wno-everything
-CFLAGS += -I$(LIBPROTOBUF_DIR)/src
 CFLAGS += -I.
 CFLAGS += -DPERFETTO_BUILD_WITH_EMBEDDER
 CFLAGS += -DPERFETTO_IMPLEMENTATION
-CFLAGS += -DGOOGLE_PROTOBUF_NO_RTTI
-CFLAGS += -DGOOGLE_PROTOBUF_NO_STATIC_INITIALIZER
 CFLAGS += -DHAVE_PTHREAD=1
 
 ANDROID_CFLAGS += --target=aarch64-linux-android
@@ -81,32 +77,6 @@ ifeq ($(TARGET),android)
 LDFLAGS += $(ANDROID_LDFLAGS)
 endif
 
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/arena.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/arenastring.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/extension_set.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/generated_message_util.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/io/coded_stream.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/io/zero_copy_stream.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/io/zero_copy_stream_impl_lite.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/message_lite.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/repeated_field.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/atomicops_internals_x86_gcc.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/atomicops_internals_x86_msvc.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/bytestream.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/common.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/int128.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/once.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/status.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/statusor.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/stringpiece.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/stringprintf.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/structurally_valid.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/strutil.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/stubs/time.cc
-PROTO_SRCS += $(LIBPROTOBUF_DIR)/src/google/protobuf/wire_format_lite.cc
-
-PROTO_OBJS = $(addprefix out/, $(PROTO_SRCS:.cc=.o))
-
 all: out/example
 
 clean:
@@ -117,7 +87,7 @@ out/check_ndk.stamp:
 	@touch $@
 
 out/mkdir.stamp:
-	@mkdir -p out/third_party/protobuf/src/google/protobuf/{io,stubs}
+	@mkdir -p out
 	@touch $@
 
 # Build object files
@@ -126,7 +96,7 @@ out/%.o: %.cc out/mkdir.stamp out/check_ndk.stamp Makefile
 	@$(CXX) -o $@ -c $(CFLAGS) $<
 
 # Link executable
-out/example: $(PROTO_OBJS) out/perfetto.o out/example.o
+out/example: out/perfetto.o out/example.o
 	@echo LNK $@
 	@$(LNK) $^ $(LDFLAGS) -o $@
 
