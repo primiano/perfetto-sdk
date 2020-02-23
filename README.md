@@ -6,8 +6,6 @@ The perfetto SDK consists of:
 - The amalgamated perfetto client library [perfetto.cc](perfetto.cc) and 
   [perfetto.h](perfetto.h).
 - A source file with usage example [example.cc](example.cc) 
-- The Google protobuf library [third_party/protobuf](third_party/protobuf).
-  This dependency will likely go away in next releases.
 
 
 **The SDK is currently experimental and subjected to changes!**
